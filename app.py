@@ -128,6 +128,10 @@ div[data-testid="stRadio"] label > div:first-child {{ display: none; }}
     border: 1px solid {ACCENT}; color:{ACCENT}; font-size: 12px; }}
 .badge-locked {{ display:inline-block; padding: 4px 10px; margin: 2px; border-radius: 12px;
     border: 1px solid #ccc; color:#999; font-size: 12px; }}
+.class-badge {{ display:inline-block; font-size: 11px; font-weight: 600; padding: 2px 9px;
+    border-radius: 999px; margin-left: 8px; vertical-align: middle; }}
+.class-geral {{ background: {ACCENT_SOFT}; color: {ACCENT}; }}
+.class-especifico {{ background: #FCE9FF; color: {PURPLE}; }}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -219,10 +223,20 @@ HEADER_ALIASES = {
         "conteudo programatico / topico", "conteudo programatico/topico", "conteudo programatico",
     ],
     "peso": ["peso", "importancia", "prioridade"],
+    "classificacao": ["classificacao", "classificacao geral/especifico", "tipo", "categoria", "geral/especifico"],
     "link": ["linktec", "link tec", "link do tec", "link", "tec"],
     "done": ["questoes feitas", "feitas"],
     "accuracy": ["% acertos", "acertos", "% acerto"],
 }
+
+
+def _normalize_classificacao(raw) -> str:
+    v = _norm(raw)
+    if not v:
+        return "Geral"
+    if "espec" in v:
+        return "Específico"
+    return "Geral"
 
 
 def parse_verticalizado(df_raw: pd.DataFrame):
@@ -250,6 +264,7 @@ def parse_verticalizado(df_raw: pd.DataFrame):
         return None
 
     imported = []
+    current_block_class = "Geral"
     for i in range(header_row_idx + 1, len(df_raw)):
         row = df_raw.iloc[i]
         materia_val = row[col_map["materia"]]
@@ -259,7 +274,14 @@ def parse_verticalizado(df_raw: pd.DataFrame):
         if not materia or materia.lower() == "nan":
             continue
         if not assunto or assunto.lower() == "nan":
-            # linha de bloco/seção (ex.: cabeçalho de P1/P2/P3) — não é uma matéria de verdade
+            # linha de bloco/seção (ex.: "CONHECIMENTOS BÁSICOS - P1..."). Não é uma matéria de
+            # verdade, mas o texto costuma indicar se o bloco é geral ou específico do cargo —
+            # usamos isso como padrão para as linhas seguintes, até o próximo bloco.
+            block_norm = _norm(materia)
+            if "especific" in block_norm or "especializ" in block_norm:
+                current_block_class = "Específico"
+            elif "basic" in block_norm or "geral" in block_norm:
+                current_block_class = "Geral"
             continue
 
         peso = 3.0
@@ -268,6 +290,11 @@ def parse_verticalizado(df_raw: pd.DataFrame):
                 peso = float(row[col_map["peso"]])
             except (TypeError, ValueError):
                 pass
+
+        if "classificacao" in col_map and pd.notna(row[col_map["classificacao"]]):
+            classificacao = _normalize_classificacao(row[col_map["classificacao"]])
+        else:
+            classificacao = current_block_class
 
         link = ""
         if "link" in col_map and pd.notna(row[col_map["link"]]):
@@ -291,9 +318,95 @@ def parse_verticalizado(df_raw: pd.DataFrame):
 
         correct = int(round(done * acc)) if (done and acc is not None) else 0
         imported.append(
-            {"materia": materia, "assunto": assunto, "peso": peso, "link": link, "done": done, "correct": correct}
+            {
+                "materia": materia, "assunto": assunto, "peso": peso, "classificacao": classificacao,
+                "link": link, "done": done, "correct": correct,
+            }
         )
     return imported
+
+
+def build_template_xlsx() -> bytes:
+    """Gera o modelo de planilha (.xlsx) para download, já formatado e com
+    a coluna de Classificação (Geral/Específico) com lista suspensa."""
+    import openpyxl
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Edital"
+
+    headers = ["Matéria", "Assunto", "Peso", "Classificação", "Link TEC"]
+    widths = [30, 55, 10, 16, 40]
+
+    title_font = Font(name="Arial", size=14, bold=True, color="1E2432")
+    note_font = Font(name="Arial", size=10, italic=True, color="8A93A6")
+    header_font = Font(name="Arial", size=11, bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="2F6FEE")
+    example_font = Font(name="Arial", size=10, italic=True, color="8A93A6")
+    body_font = Font(name="Arial", size=10, color="1E2432")
+    thin = Side(style="thin", color="E7E9F3")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    ws.merge_cells("A1:E1")
+    ws["A1"] = "Modelo de Edital Verticalizado — Coach de Estudos"
+    ws["A1"].font = title_font
+
+    ws.merge_cells("A2:E2")
+    ws["A2"] = (
+        "Preencha uma linha por tópico. Peso vai de 1 (baixa prioridade) a 5 (altíssima prioridade). "
+        "Classificação aceita apenas Geral (conhecimentos comuns/básicos) ou Específico (do cargo). "
+        "Link TEC é opcional."
+    )
+    ws["A2"].font = note_font
+    ws["A2"].alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[2].height = 30
+
+    header_row = 4
+    for j, h in enumerate(headers, start=1):
+        cell = ws.cell(row=header_row, column=j, value=h)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+
+    examples = [
+        ("Direito Constitucional", "Controle de Constitucionalidade", 5, "Específico", ""),
+        ("Língua Portuguesa", "Concordância Verbal e Nominal", 3, "Geral", ""),
+    ]
+    for i, row_vals in enumerate(examples, start=header_row + 1):
+        for j, val in enumerate(row_vals, start=1):
+            cell = ws.cell(row=i, column=j, value=val)
+            cell.font = example_font
+            cell.border = border
+            if j == 2:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    last_row = header_row + 200
+    for i in range(header_row + len(examples) + 1, last_row + 1):
+        for j in range(1, len(headers) + 1):
+            ws.cell(row=i, column=j).font = body_font
+            ws.cell(row=i, column=j).border = border
+
+    dv_class = DataValidation(type="list", formula1='"Geral,Específico"', allow_blank=True, showDropDown=False)
+    ws.add_data_validation(dv_class)
+    dv_class.add(f"D{header_row + 1}:D{last_row}")
+
+    dv_peso = DataValidation(type="whole", operator="between", formula1=1, formula2=5, allow_blank=True)
+    dv_peso.error = "Peso deve ser um número inteiro de 1 a 5."
+    ws.add_data_validation(dv_peso)
+    dv_peso.add(f"C{header_row + 1}:C{last_row}")
+
+    for j, w in enumerate(widths, start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(j)].width = w
+
+    ws.freeze_panes = f"A{header_row + 1}"
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
 
 
 # ----------------------------------------------------------------------------
@@ -586,10 +699,18 @@ if page == "Painel":
                     st.progress(min(1.0, streak / 30))
 
             st.markdown("#### Matérias")
-            if search_query and not visible_subjects:
-                st.caption("Nenhuma matéria encontrada para essa busca.")
+            class_filter = st.radio(
+                "Filtrar", ["Todas", "Geral", "Específico"], horizontal=True,
+                label_visibility="collapsed", key="class_filter",
+            )
+            if class_filter != "Todas":
+                visible_subjects_shown = [s for s in visible_subjects if s.get("classificacao", "Geral") == class_filter]
+            else:
+                visible_subjects_shown = visible_subjects
+            if not visible_subjects_shown:
+                st.caption("Nenhuma matéria encontrada para esse filtro.")
 
-            for idx, s in enumerate(visible_subjects):
+            for idx, s in enumerate(visible_subjects_shown):
                 key = subject_key(s["materia"], s.get("assunto", ""))
                 widget_id = f"{idx}_{key}"
                 goal = weekly_goal_for(s, total_goal, sum_weights)
@@ -598,6 +719,8 @@ if page == "Painel":
                 correct = entry.get("correct", 0)
                 color = subject_color(s["materia"])
                 initials = "".join(w[0] for w in s["materia"].split()[:2]).upper() or "?"
+                classificacao = s.get("classificacao", "Geral")
+                class_css = "class-especifico" if classificacao == "Específico" else "class-geral"
 
                 with st.container(border=True):
                     icon_col, info_col, input_col = st.columns([1, 4, 3])
@@ -607,7 +730,11 @@ if page == "Painel":
                             unsafe_allow_html=True,
                         )
                     with info_col:
-                        st.markdown(f"**{s['materia']}**" + (f" · _{s['assunto']}_" if s.get("assunto") else ""))
+                        st.markdown(
+                            f"**{s['materia']}**" + (f" · _{s['assunto']}_" if s.get("assunto") else "")
+                            + f' <span class="class-badge {class_css}">{classificacao}</span>',
+                            unsafe_allow_html=True,
+                        )
                         if goal:
                             st.progress(min(1.0, done / goal), text=f"{done} / {goal} questões")
                     with input_col:
@@ -695,8 +822,15 @@ elif page == "Matérias & Pesos":
         "Para excluir, selecione a linha e aperte a lixeira que aparece no canto."
     )
 
-    df = pd.DataFrame(subjects) if subjects else pd.DataFrame(columns=["materia", "assunto", "peso", "link"])
-    df = df.rename(columns={"materia": "Matéria", "assunto": "Assunto", "peso": "Peso", "link": "Link TEC"})
+    df = pd.DataFrame(subjects) if subjects else pd.DataFrame(columns=["materia", "assunto", "peso", "classificacao", "link"])
+    if "classificacao" not in df.columns:
+        df["classificacao"] = "Geral"
+    df["classificacao"] = df["classificacao"].fillna("Geral")
+    df = df[["materia", "assunto", "peso", "classificacao", "link"]]
+    df = df.rename(columns={
+        "materia": "Matéria", "assunto": "Assunto", "peso": "Peso",
+        "classificacao": "Classificação", "link": "Link TEC",
+    })
 
     edited = st.data_editor(
         df,
@@ -705,6 +839,7 @@ elif page == "Matérias & Pesos":
         key=f"editor_{current_edital['id']}",
         column_config={
             "Peso": st.column_config.NumberColumn("Peso (1 a 5)", min_value=1, max_value=5, step=0.5),
+            "Classificação": st.column_config.SelectboxColumn("Classificação", options=["Geral", "Específico"], default="Geral"),
             "Link TEC": st.column_config.LinkColumn("Link TEC"),
         },
     )
@@ -719,6 +854,7 @@ elif page == "Matérias & Pesos":
                 "materia": materia,
                 "assunto": "" if pd.isna(row.get("Assunto")) else str(row.get("Assunto")).strip(),
                 "peso": float(row.get("Peso")) if pd.notna(row.get("Peso")) else 1.0,
+                "classificacao": row.get("Classificação") if row.get("Classificação") in ("Geral", "Específico") else "Geral",
                 "link": "" if pd.isna(row.get("Link TEC")) else str(row.get("Link TEC")).strip(),
             }
         )
@@ -749,21 +885,15 @@ elif page == "Matérias & Pesos":
 elif page == "Importar planilha":
     st.caption(
         "Padrão de upload: sua planilha de **Edital Verticalizado** (colunas Grupo/Disciplina, "
-        "Conteúdo Programático/Tópico e, opcionalmente, Link TEC). Também aceita uma planilha "
-        "simples com colunas Materia/Assunto/Peso/LinkTEC."
+        "Conteúdo Programático/Tópico, Classificação Geral/Específico e, opcionalmente, Link TEC). "
+        "Também aceita uma planilha simples com colunas Materia/Assunto/Peso/Classificação/LinkTEC."
     )
 
-    template = pd.DataFrame(
-        [
-            {"Materia": "Direito Constitucional", "Assunto": "Controle de Constitucionalidade", "Peso": 5, "LinkTEC": ""},
-            {"Materia": "Portugues", "Assunto": "Concordancia Verbal e Nominal", "Peso": 3, "LinkTEC": ""},
-        ]
-    )
     st.download_button(
-        "⬇️ Baixar planilha modelo (formato simples)",
-        template.to_csv(index=False).encode("utf-8"),
-        "modelo-edital.csv",
-        "text/csv",
+        "⬇️ Baixar planilha modelo (.xlsx)",
+        build_template_xlsx(),
+        "modelo-edital-verticalizado.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
 
     file = st.file_uploader("Envie a planilha do edital", type=["csv", "xlsx", "xls"])
@@ -796,6 +926,7 @@ elif page == "Importar planilha":
                 c_mat = col("materia", "disciplina", "grupo")
                 c_ass = col("assunto", "topico", "tema", "conteudo programatico")
                 c_peso = col("peso", "importancia", "prioridade")
+                c_class = col("classificacao", "tipo", "categoria", "geral/especifico")
                 c_link = col("linktec", "link tec", "link", "tec")
 
                 if not c_mat:
@@ -811,6 +942,7 @@ elif page == "Importar planilha":
                                 "materia": materia,
                                 "assunto": str(row[c_ass]).strip() if c_ass and pd.notna(row[c_ass]) else "",
                                 "peso": float(row[c_peso]) if c_peso and pd.notna(row[c_peso]) else 3.0,
+                                "classificacao": _normalize_classificacao(row[c_class]) if c_class and pd.notna(row[c_class]) else "Geral",
                                 "link": str(row[c_link]).strip() if c_link and pd.notna(row[c_link]) else "",
                                 "done": 0,
                                 "correct": 0,
@@ -826,8 +958,11 @@ elif page == "Importar planilha":
             else:
                 st.markdown(f"**{len(imported)} matérias/assuntos encontrados:**")
                 st.dataframe(
-                    pd.DataFrame(imported)[["materia", "assunto", "peso", "link"]].rename(
-                        columns={"materia": "Matéria", "assunto": "Assunto", "peso": "Peso", "link": "Link TEC"}
+                    pd.DataFrame(imported)[["materia", "assunto", "peso", "classificacao", "link"]].rename(
+                        columns={
+                            "materia": "Matéria", "assunto": "Assunto", "peso": "Peso",
+                            "classificacao": "Classificação", "link": "Link TEC",
+                        }
                     ),
                     use_container_width=True,
                     hide_index=True,
@@ -855,7 +990,10 @@ elif page == "Importar planilha":
                     st.rerun()
 
                 clean_imported = [
-                    {"materia": r["materia"], "assunto": r["assunto"], "peso": r["peso"], "link": r["link"]}
+                    {
+                        "materia": r["materia"], "assunto": r["assunto"], "peso": r["peso"],
+                        "classificacao": r.get("classificacao", "Geral"), "link": r["link"],
+                    }
                     for r in imported
                 ]
 
