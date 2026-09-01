@@ -133,6 +133,7 @@ div[data-testid="stRadio"] label > div:first-child {{ display: none; }}
     border-radius: 999px; margin-left: 8px; vertical-align: middle; }}
 .class-geral {{ background: {ACCENT_SOFT}; color: {ACCENT}; }}
 .class-especifico {{ background: #FCE9FF; color: {PURPLE}; }}
+.class-neutral {{ background: #F1F3F9; color: {MUTED}; }}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -243,11 +244,31 @@ HEADER_ALIASES = {
         "conteudo programatico / topico", "conteudo programatico/topico", "conteudo programatico",
     ],
     "peso": ["peso", "importancia", "prioridade"],
+    "itens_previstos": [
+        "previsao de itens", "estimativa de itens", "itens previstos", "qtd itens",
+        "quantidade de itens", "n de itens", "numero de itens", "itens",
+    ],
     "classificacao": ["classificacao", "classificacao geral/especifico", "tipo", "categoria", "geral/especifico"],
     "link": ["linktec", "link tec", "link do tec", "link", "tec"],
     "done": ["questoes feitas", "feitas"],
     "accuracy": ["% acertos", "acertos", "% acerto"],
 }
+
+
+def _header_matches(cell_norm: str, aliases) -> bool:
+    """Compara um cabeçalho normalizado com uma lista de aliases, tolerando
+    sufixos como "(1-3)", "(1 a 5)" etc. (ex.: "peso (1-3)" casa com "peso")."""
+    for a in aliases:
+        if cell_norm == a or cell_norm.startswith(a + " ") or cell_norm.startswith(a + "("):
+            return True
+    return False
+
+
+def _parse_itens_previstos(raw):
+    """Extrai o número de uma célula como '~15 itens' ou '15'. Retorna None
+    se não achar nenhum dígito."""
+    m = re.search(r"(\d+)", str(raw or ""))
+    return int(m.group(1)) if m else None
 
 
 def _normalize_classificacao(raw) -> str:
@@ -274,7 +295,7 @@ def parse_verticalizado(df_raw: pd.DataFrame):
             if not cell_norm:
                 continue
             for field, aliases in HEADER_ALIASES.items():
-                if field not in found and cell_norm in aliases:
+                if field not in found and _header_matches(cell_norm, aliases):
                     found[field] = j
         if "materia" in found and "assunto" in found:
             header_row_idx = i
@@ -311,6 +332,10 @@ def parse_verticalizado(df_raw: pd.DataFrame):
             except (TypeError, ValueError):
                 pass
 
+        itens_previstos = None
+        if "itens_previstos" in col_map and pd.notna(row[col_map["itens_previstos"]]):
+            itens_previstos = _parse_itens_previstos(row[col_map["itens_previstos"]])
+
         if "classificacao" in col_map and pd.notna(row[col_map["classificacao"]]):
             classificacao = _normalize_classificacao(row[col_map["classificacao"]])
         else:
@@ -339,16 +364,17 @@ def parse_verticalizado(df_raw: pd.DataFrame):
         correct = int(round(done * acc)) if (done and acc is not None) else 0
         imported.append(
             {
-                "materia": materia, "assunto": assunto, "peso": peso, "classificacao": classificacao,
-                "link": link, "done": done, "correct": correct,
+                "materia": materia, "assunto": assunto, "peso": peso, "itens_previstos": itens_previstos,
+                "classificacao": classificacao, "link": link, "done": done, "correct": correct,
             }
         )
     return imported
 
 
 def build_template_xlsx() -> bytes:
-    """Gera o modelo de planilha (.xlsx) para download, já formatado e com
-    a coluna de Classificação (Geral/Específico) com lista suspensa."""
+    """Gera o modelo de planilha (.xlsx) para download, no padrão do Edital
+    Verticalizado (Matéria, Previsão de Itens, Assunto, Peso, Classificação,
+    Link TEC), já formatado e com listas suspensas."""
     import openpyxl
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.worksheet.datavalidation import DataValidation
@@ -357,8 +383,8 @@ def build_template_xlsx() -> bytes:
     ws = wb.active
     ws.title = "Edital"
 
-    headers = ["Matéria", "Assunto", "Peso", "Classificação", "Link TEC"]
-    widths = [30, 55, 10, 16, 40]
+    headers = ["Matéria", "Previsão de Itens", "Assunto", "Peso", "Classificação", "Link TEC"]
+    widths = [30, 16, 55, 10, 16, 40]
 
     title_font = Font(name="Arial", size=14, bold=True, color="1E2432")
     note_font = Font(name="Arial", size=10, italic=True, color="8A93A6")
@@ -369,13 +395,17 @@ def build_template_xlsx() -> bytes:
     thin = Side(style="thin", color="E7E9F3")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    ws.merge_cells("A1:E1")
+    last_col_letter = openpyxl.utils.get_column_letter(len(headers))
+
+    ws.merge_cells(f"A1:{last_col_letter}1")
     ws["A1"] = "Modelo de Edital Verticalizado — Coach de Estudos"
     ws["A1"].font = title_font
 
-    ws.merge_cells("A2:E2")
+    ws.merge_cells(f"A2:{last_col_letter}2")
     ws["A2"] = (
-        "Preencha uma linha por tópico. Peso vai de 1 (baixa prioridade) a 5 (altíssima prioridade). "
+        "Preencha uma linha por tópico. Previsão de Itens é a estimativa de quantas questões daquele "
+        "tópico caem na prova (opcional, só informativo — pode escrever '15' ou '~15 itens'). Peso pode "
+        "seguir qualquer escala (1 a 3, 1 a 5 etc.) — o que importa é a proporção entre as matérias. "
         "Classificação aceita apenas Geral (conhecimentos comuns/básicos) ou Específico (do cargo). "
         "Link TEC é opcional."
     )
@@ -392,15 +422,15 @@ def build_template_xlsx() -> bytes:
         cell.border = border
 
     examples = [
-        ("Direito Constitucional", "Controle de Constitucionalidade", 5, "Específico", ""),
-        ("Língua Portuguesa", "Concordância Verbal e Nominal", 3, "Geral", ""),
+        ("Direito Constitucional", "~10 itens", "Controle de Constitucionalidade", 3, "Específico", ""),
+        ("Língua Portuguesa", "~15 itens", "Concordância Verbal e Nominal", 3, "Geral", ""),
     ]
     for i, row_vals in enumerate(examples, start=header_row + 1):
         for j, val in enumerate(row_vals, start=1):
             cell = ws.cell(row=i, column=j, value=val)
             cell.font = example_font
             cell.border = border
-            if j == 2:
+            if j == 3:
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
 
     last_row = header_row + 200
@@ -411,12 +441,12 @@ def build_template_xlsx() -> bytes:
 
     dv_class = DataValidation(type="list", formula1='"Geral,Específico"', allow_blank=True, showDropDown=False)
     ws.add_data_validation(dv_class)
-    dv_class.add(f"D{header_row + 1}:D{last_row}")
+    dv_class.add(f"E{header_row + 1}:E{last_row}")
 
-    dv_peso = DataValidation(type="whole", operator="between", formula1=1, formula2=5, allow_blank=True)
-    dv_peso.error = "Peso deve ser um número inteiro de 1 a 5."
+    dv_peso = DataValidation(type="decimal", operator="between", formula1=1, formula2=10, allow_blank=True)
+    dv_peso.error = "Peso deve ser um número entre 1 e 10 (qualquer escala que você usar)."
     ws.add_data_validation(dv_peso)
-    dv_peso.add(f"C{header_row + 1}:C{last_row}")
+    dv_peso.add(f"D{header_row + 1}:D{last_row}")
 
     for j, w in enumerate(widths, start=1):
         ws.column_dimensions[openpyxl.utils.get_column_letter(j)].width = w
@@ -750,9 +780,11 @@ if page == "Painel":
                             unsafe_allow_html=True,
                         )
                     with info_col:
+                        itens_prev = s.get("itens_previstos")
+                        itens_badge = f' <span class="class-badge class-neutral">≈{itens_prev} itens</span>' if itens_prev else ""
                         st.markdown(
                             f"**{s['materia']}**" + (f" · _{s['assunto']}_" if s.get("assunto") else "")
-                            + f' <span class="class-badge {class_css}">{classificacao}</span>',
+                            + f' <span class="class-badge {class_css}">{classificacao}</span>' + itens_badge,
                             unsafe_allow_html=True,
                         )
                         if goal:
@@ -861,17 +893,24 @@ elif page == "Matérias & Pesos":
 
     st.caption(
         "Edite direto na tabela. Para adicionar uma matéria, use a última linha em branco. "
-        "Para excluir, selecione a linha e aperte a lixeira que aparece no canto."
+        "Para excluir, selecione a linha e aperte a lixeira que aparece no canto. Peso pode seguir "
+        "qualquer escala (1 a 3, 1 a 5 etc.) — o que importa é a proporção entre as matérias. "
+        "Itens Previstos é a estimativa de quantas questões daquele tópico caem na prova (opcional, "
+        "só informativo)."
     )
 
-    df = pd.DataFrame(subjects) if subjects else pd.DataFrame(columns=["materia", "assunto", "peso", "classificacao", "link"])
+    df = pd.DataFrame(subjects) if subjects else pd.DataFrame(
+        columns=["materia", "assunto", "peso", "itens_previstos", "classificacao", "link"]
+    )
     if "classificacao" not in df.columns:
         df["classificacao"] = "Geral"
     df["classificacao"] = df["classificacao"].fillna("Geral")
-    df = df[["materia", "assunto", "peso", "classificacao", "link"]]
+    if "itens_previstos" not in df.columns:
+        df["itens_previstos"] = None
+    df = df[["materia", "assunto", "peso", "itens_previstos", "classificacao", "link"]]
     df = df.rename(columns={
         "materia": "Matéria", "assunto": "Assunto", "peso": "Peso",
-        "classificacao": "Classificação", "link": "Link TEC",
+        "itens_previstos": "Itens Previstos", "classificacao": "Classificação", "link": "Link TEC",
     })
 
     edited = st.data_editor(
@@ -880,7 +919,8 @@ elif page == "Matérias & Pesos":
         use_container_width=True,
         key=f"editor_{current_edital['id']}",
         column_config={
-            "Peso": st.column_config.NumberColumn("Peso (1 a 5)", min_value=1, max_value=5, step=0.5),
+            "Peso": st.column_config.NumberColumn("Peso", min_value=1, max_value=10, step=0.5),
+            "Itens Previstos": st.column_config.NumberColumn("Itens Previstos", min_value=0, step=1, help="Estimativa de itens na prova (opcional)"),
             "Classificação": st.column_config.SelectboxColumn("Classificação", options=["Geral", "Específico"], default="Geral"),
             "Link TEC": st.column_config.LinkColumn("Link TEC"),
         },
@@ -896,6 +936,7 @@ elif page == "Matérias & Pesos":
                 "materia": materia,
                 "assunto": "" if pd.isna(row.get("Assunto")) else str(row.get("Assunto")).strip(),
                 "peso": float(row.get("Peso")) if pd.notna(row.get("Peso")) else 1.0,
+                "itens_previstos": int(row.get("Itens Previstos")) if pd.notna(row.get("Itens Previstos")) else None,
                 "classificacao": row.get("Classificação") if row.get("Classificação") in ("Geral", "Específico") else "Geral",
                 "link": "" if pd.isna(row.get("Link TEC")) else str(row.get("Link TEC")).strip(),
             }
@@ -963,12 +1004,16 @@ elif page == "Importar planilha":
                     for n in names:
                         if n in cols:
                             return cols[n]
+                    for cn, original in cols.items():
+                        if _header_matches(cn, names):
+                            return original
                     return None
 
                 c_mat = col("materia", "disciplina", "grupo")
                 c_ass = col("assunto", "topico", "tema", "conteudo programatico")
                 c_peso = col("peso", "importancia", "prioridade")
                 c_class = col("classificacao", "tipo", "categoria", "geral/especifico")
+                c_itens = col("previsao de itens", "itens previstos", "qtd itens", "quantidade de itens", "itens")
                 c_link = col("linktec", "link tec", "link", "tec")
 
                 if not c_mat:
@@ -984,6 +1029,7 @@ elif page == "Importar planilha":
                                 "materia": materia,
                                 "assunto": str(row[c_ass]).strip() if c_ass and pd.notna(row[c_ass]) else "",
                                 "peso": float(row[c_peso]) if c_peso and pd.notna(row[c_peso]) else 3.0,
+                                "itens_previstos": _parse_itens_previstos(row[c_itens]) if c_itens and pd.notna(row[c_itens]) else None,
                                 "classificacao": _normalize_classificacao(row[c_class]) if c_class and pd.notna(row[c_class]) else "Geral",
                                 "link": str(row[c_link]).strip() if c_link and pd.notna(row[c_link]) else "",
                                 "done": 0,
@@ -1000,10 +1046,10 @@ elif page == "Importar planilha":
             else:
                 st.markdown(f"**{len(imported)} matérias/assuntos encontrados:**")
                 st.dataframe(
-                    pd.DataFrame(imported)[["materia", "assunto", "peso", "classificacao", "link"]].rename(
+                    pd.DataFrame(imported)[["materia", "assunto", "peso", "itens_previstos", "classificacao", "link"]].rename(
                         columns={
                             "materia": "Matéria", "assunto": "Assunto", "peso": "Peso",
-                            "classificacao": "Classificação", "link": "Link TEC",
+                            "itens_previstos": "Itens Previstos", "classificacao": "Classificação", "link": "Link TEC",
                         }
                     ),
                     use_container_width=True,
@@ -1034,6 +1080,7 @@ elif page == "Importar planilha":
                 clean_imported = [
                     {
                         "materia": r["materia"], "assunto": r["assunto"], "peso": r["peso"],
+                        "itens_previstos": r.get("itens_previstos"),
                         "classificacao": r.get("classificacao", "Geral"), "link": r["link"],
                     }
                     for r in imported
