@@ -12,6 +12,7 @@ os mesmos dados.
 import io
 import json
 import math
+import re
 import unicodedata
 import uuid
 from datetime import date, datetime, timedelta
@@ -210,6 +211,25 @@ def _norm(s) -> str:
     """minúsculas, sem acento, sem espaços nas pontas — para comparar cabeçalhos"""
     s = str(s or "").strip().lower()
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
+
+
+def parse_tec_counter(text: str):
+    """Extrai (respondidas, acertos, erros) de um texto colado do contador do
+    TEC Concursos, ex.: "1 de 964 (1 R, 1 A e 0 E)". Retorna None se não
+    conseguir reconhecer o padrão."""
+    if not text:
+        return None
+    m = re.search(r"\(([^)]*)\)", text)
+    inner = m.group(1) if m else text
+    r_m = re.search(r"(\d+)\s*R\b", inner, re.IGNORECASE)
+    a_m = re.search(r"(\d+)\s*A\b", inner, re.IGNORECASE)
+    e_m = re.search(r"(\d+)\s*E\b", inner, re.IGNORECASE)
+    if not r_m or not a_m:
+        return None
+    respondidas = int(r_m.group(1))
+    acertos = int(a_m.group(1))
+    erros = int(e_m.group(1)) if e_m else max(respondidas - acertos, 0)
+    return respondidas, acertos, erros
 
 
 # ----------------------------------------------------------------------------
@@ -763,6 +783,28 @@ if page == "Painel":
                                 "Se a tela acima aparecer em branco, o TEC Concursos está bloqueando a "
                                 "incorporação por segurança — use o botão 'Estudar no TEC' acima, que abre em nova guia."
                             )
+
+                    with st.expander("📋 Colar contador do TEC"):
+                        st.caption(
+                            "Copie o textinho do TEC (ex.: **1 de 964 (1 R, 1 A e 0 E)**) e cole abaixo — "
+                            "o app extrai Feitas e Acertos automaticamente."
+                        )
+                        paste_key = f"tec_paste_{current_edital['id']}_{wk['key']}_{widget_id}"
+                        pasted = st.text_input("Colar aqui", key=paste_key, placeholder="1 de 964 (1 R, 1 A e 0 E)")
+                        if st.button("Aplicar", key=f"apply_{paste_key}"):
+                            parsed = parse_tec_counter(pasted)
+                            if not parsed:
+                                st.error("Não reconheci esse formato. Confira se copiou o trecho com R, A e E.")
+                            else:
+                                p_done, p_correct, _p_wrong = parsed
+                                wk_log = state["weeklyLog"].setdefault(wk["key"], {})
+                                ed_log = wk_log.setdefault(current_edital["id"], {})
+                                if offset == 0 and p_done > done:
+                                    today_str = date.today().isoformat()
+                                    state["dailyActivity"][today_str] = state["dailyActivity"].get(today_str, 0) + (p_done - done)
+                                ed_log[key] = {"done": p_done, "correct": min(p_correct, p_done)}
+                                save_state(state)
+                                st.rerun()
 
                     if new_done != done or new_correct != correct:
                         wk_log = state["weeklyLog"].setdefault(wk["key"], {})
