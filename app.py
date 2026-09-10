@@ -610,10 +610,11 @@ def _find_state_file_id():
 
 
 def load_state() -> dict:
-    """Carrega o estado do Drive. Se o arquivo existe mas não consegue ser
-    baixado (ex.: falha de rede), NUNCA retorna um estado em branco — isso
-    poderia acabar sobrescrevendo dados reais no primeiro save_state(). Em
-    vez disso, para o app com um erro bem visível para tentar de novo."""
+    """Carrega o arquivo do Drive (guarda TODOS os usuários, um por chave em
+    "users"). Se o arquivo existe mas não consegue ser baixado (ex.: falha de
+    rede), NUNCA retorna um estado em branco — isso poderia acabar
+    sobrescrevendo dados reais no primeiro save_state(). Em vez disso, para o
+    app com um erro bem visível para tentar de novo."""
     try:
         file_id = _find_state_file_id()
     except Exception as e:
@@ -624,8 +625,8 @@ def load_state() -> dict:
         st.stop()
 
     if not file_id:
-        # não existe arquivo ainda — primeira vez usando o app, estado em branco é seguro
-        return {k: (type(v)() if isinstance(v, (list, dict)) else v) for k, v in DEFAULT_STATE.items()}
+        # não existe arquivo ainda — primeira vez usando o app
+        return {"users": {}}
 
     last_error = None
     for attempt in range(3):
@@ -637,9 +638,14 @@ def load_state() -> dict:
             while not done:
                 _, done = downloader.next_chunk()
             buf.seek(0)
-            loaded = json.loads(buf.read().decode("utf-8"))
-            for k, v in DEFAULT_STATE.items():
-                loaded.setdefault(k, v if not isinstance(v, (list, dict)) else type(v)())
+            raw_text = buf.read().decode("utf-8")
+            loaded = json.loads(raw_text) if raw_text.strip() else {}
+            if "users" not in loaded and "editais" in loaded:
+                # migração automática: arquivo do formato antigo (single-user, sem
+                # a chave "users") — os dados que já existiam ficam associados ao
+                # usuário padrão do dono do app, sem perder nada.
+                loaded = {"users": {APP_OWNER_NAME.strip().lower(): loaded}}
+            loaded.setdefault("users", {})
             st.session_state["_gdrive_file_id"] = file_id
             st.session_state["_last_loaded_ok"] = True
             return loaded
@@ -658,9 +664,12 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> bool:
-    """Salva o estado no Drive, com algumas tentativas em caso de falha de rede.
-    Retorna True se salvou com sucesso."""
-    payload = json.dumps(state, ensure_ascii=False).encode("utf-8")
+    """Salva no Drive, com algumas tentativas em caso de falha de rede.
+    Retorna True se salvou com sucesso. `state` é ignorado como origem dos
+    dados — sempre gravamos `st.session_state.full_state` (o arquivo INTEIRO,
+    com todos os usuários), já que `state` é só a fatia do usuário atual, e é
+    a mesma referência de objeto que já está dentro de full_state."""
+    payload = json.dumps(st.session_state.full_state, ensure_ascii=False).encode("utf-8")
     last_error = None
     for attempt in range(3):
         try:
@@ -695,11 +704,49 @@ if drive is None:
     )
     st.stop()
 
-if "state" not in st.session_state:
-    st.session_state.state = load_state()
+# ----------------------------------------------------------------------------
+# Login (usuários pré-cadastrados no secrets.toml — bloco [users])
+# ----------------------------------------------------------------------------
 
-state = st.session_state.state
-user_label = APP_OWNER_NAME
+USERS = st.secrets.get("users", {})
+USER_DISPLAY_NAMES = st.secrets.get("user_display_names", {})
+
+if not USERS:
+    st.error(
+        "Nenhum usuário configurado. Adicione um bloco `[users]` (usuário = \"senha\") "
+        "em `.streamlit/secrets.toml` (veja o README.md)."
+    )
+    st.stop()
+
+if "auth_user" not in st.session_state:
+    st.markdown("## 🎯 Coach de Estudos")
+    st.caption("Entre com seu usuário para continuar.")
+    with st.form("login_form"):
+        login_user = st.text_input("Usuário")
+        login_pass = st.text_input("Senha", type="password")
+        if st.form_submit_button("Entrar"):
+            if USERS.get(login_user) == login_pass:
+                st.session_state.auth_user = login_user
+                st.rerun()
+            else:
+                st.error("Usuário ou senha incorretos.")
+    st.stop()
+
+username = st.session_state.auth_user
+user_label = USER_DISPLAY_NAMES.get(username, username.capitalize())
+
+if "full_state" not in st.session_state:
+    st.session_state.full_state = load_state()
+
+full_state = st.session_state.full_state
+full_state.setdefault("users", {})
+if username not in full_state["users"]:
+    full_state["users"][username] = {k: (type(v)() if isinstance(v, (list, dict)) else v) for k, v in DEFAULT_STATE.items()}
+else:
+    for k, v in DEFAULT_STATE.items():
+        full_state["users"][username].setdefault(k, v if not isinstance(v, (list, dict)) else type(v)())
+
+state = full_state["users"][username]
 
 PAGES = ["Meus Editais", "Painel", "Timer", "Matérias & Pesos", "Importar planilha", "Dashboard"]
 if "page" not in st.session_state:
@@ -767,6 +814,11 @@ with st.sidebar:
         if save_state(state):
             st.toast("Dados salvos no Google Drive ✓")
             st.rerun()
+
+    st.divider()
+    if st.button("🚪 Sair", width="stretch"):
+        del st.session_state["auth_user"]
+        st.rerun()
 
 page = st.session_state.page
 
