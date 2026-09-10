@@ -22,7 +22,6 @@ import pandas as pd
 import streamlit as st
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 
 # ----------------------------------------------------------------------------
 # Configuração da página e do cliente do Google Drive
@@ -31,21 +30,41 @@ from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
 st.set_page_config(page_title="Coach de Estudos", page_icon="🎯", layout="wide")
 
 APP_OWNER_NAME = "Andrei"
-DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]
+DRIVE_SCOPES = [
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/spreadsheets",
+]
 GDRIVE_FOLDER_ID = st.secrets.get("GDRIVE_FOLDER_ID", "")
-STATE_FILENAME = "coach_estudos_state.json"
+SHEET_NAME = "coach_estudos_state"
+_SHEET_CHUNK_SIZE = 40000  # células do Sheets aguentam até ~50.000 caracteres cada
+
+
+@st.cache_resource
+def get_google_creds():
+    sa_info = st.secrets.get("gdrive_service_account")
+    if not sa_info or not GDRIVE_FOLDER_ID:
+        return None
+    return service_account.Credentials.from_service_account_info(dict(sa_info), scopes=DRIVE_SCOPES)
 
 
 @st.cache_resource
 def get_drive_service():
-    sa_info = st.secrets.get("gdrive_service_account")
-    if not sa_info or not GDRIVE_FOLDER_ID:
+    creds = get_google_creds()
+    if creds is None:
         return None
-    creds = service_account.Credentials.from_service_account_info(dict(sa_info), scopes=DRIVE_SCOPES)
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
+@st.cache_resource
+def get_sheets_service():
+    creds = get_google_creds()
+    if creds is None:
+        return None
+    return build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+
 drive = get_drive_service()
+sheets_api = get_sheets_service()
 
 # ----------------------------------------------------------------------------
 # Tema visual (paleta inspirada no layout de referência enviado)
@@ -576,26 +595,57 @@ def build_template_xlsx() -> bytes:
 
 
 # ----------------------------------------------------------------------------
-# Persistência (Google Drive — um único arquivo JSON)
+# Persistência (Google Sheets — uma única planilha, guardada dentro da pasta do
+# Drive. Usamos Sheets em vez de um arquivo .json cru porque formatos nativos
+# do Google (Sheets/Docs/Slides) NÃO contam para a cota de armazenamento —
+# contas de serviço têm cota zero e não conseguem criar arquivos comuns.)
 # ----------------------------------------------------------------------------
 
 DEFAULT_STATE = {"editais": [], "currentEditalId": None, "weeklyLog": {}, "dailyActivity": {}}
 
 
-def _find_state_file_id():
-    query = f"'{GDRIVE_FOLDER_ID}' in parents and name = '{STATE_FILENAME}' and trashed = false"
+def _find_state_spreadsheet_id():
+    query = (
+        f"'{GDRIVE_FOLDER_ID}' in parents and name = '{SHEET_NAME}' and trashed = false "
+        f"and mimeType = 'application/vnd.google-apps.spreadsheet'"
+    )
     res = drive.files().list(q=query, fields="files(id, name)", spaces="drive").execute()
     files = res.get("files", [])
     return files[0]["id"] if files else None
 
 
+def _create_state_spreadsheet() -> str:
+    spreadsheet = sheets_api.spreadsheets().create(
+        body={"properties": {"title": SHEET_NAME}}, fields="spreadsheetId"
+    ).execute()
+    sid = spreadsheet["spreadsheetId"]
+    # Sheets API cria na raiz do Drive por padrão — move para a pasta certa.
+    # Isso é só metadado (não sobe bytes novos), então não esbarra na cota da conta de serviço.
+    drive.files().update(fileId=sid, addParents=GDRIVE_FOLDER_ID, removeParents="root", fields="id, parents").execute()
+    return sid
+
+
+def _read_state_payload(spreadsheet_id: str) -> str:
+    res = sheets_api.spreadsheets().values().get(spreadsheetId=spreadsheet_id, range="A:A").execute()
+    rows = res.get("values", [])
+    return "".join(r[0] for r in rows if r)
+
+
+def _write_state_payload(spreadsheet_id: str, payload: str):
+    chunks = [payload[i:i + _SHEET_CHUNK_SIZE] for i in range(0, len(payload), _SHEET_CHUNK_SIZE)] or [""]
+    sheets_api.spreadsheets().values().clear(spreadsheetId=spreadsheet_id, range="A:A").execute()
+    sheets_api.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id, range="A1", valueInputOption="RAW", body={"values": [[c] for c in chunks]}
+    ).execute()
+
+
 def load_state() -> dict:
-    """Carrega o estado do Drive. Se o arquivo existe mas não consegue ser
-    baixado (ex.: falha de rede), NUNCA retorna um estado em branco — isso
+    """Carrega o estado da planilha no Drive. Se ela existe mas não consegue
+    ser lida (ex.: falha de rede), NUNCA retorna um estado em branco — isso
     poderia acabar sobrescrevendo dados reais no primeiro save_state(). Em
     vez disso, para o app com um erro bem visível para tentar de novo."""
     try:
-        file_id = _find_state_file_id()
+        spreadsheet_id = _find_state_spreadsheet_id()
     except Exception as e:
         st.error(
             f"Não foi possível conectar ao Google Drive para carregar seus dados. "
@@ -603,34 +653,28 @@ def load_state() -> dict:
         )
         st.stop()
 
-    if not file_id:
-        # não existe arquivo ainda — primeira vez usando o app, estado em branco é seguro
+    if not spreadsheet_id:
+        # não existe planilha ainda — primeira vez usando o app, estado em branco é seguro
         return {k: (type(v)() if isinstance(v, (list, dict)) else v) for k, v in DEFAULT_STATE.items()}
 
     last_error = None
     for attempt in range(3):
         try:
-            request = drive.files().get_media(fileId=file_id)
-            buf = io.BytesIO()
-            downloader = MediaIoBaseDownload(buf, request)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk()
-            buf.seek(0)
-            loaded = json.loads(buf.read().decode("utf-8"))
+            payload = _read_state_payload(spreadsheet_id)
+            loaded = json.loads(payload) if payload else {}
             for k, v in DEFAULT_STATE.items():
                 loaded.setdefault(k, v if not isinstance(v, (list, dict)) else type(v)())
-            st.session_state["_gdrive_file_id"] = file_id
+            st.session_state["_gsheet_id"] = spreadsheet_id
             st.session_state["_last_loaded_ok"] = True
             return loaded
         except Exception as e:
             last_error = e
             time.sleep(1.5)
 
-    # o arquivo EXISTE mas não conseguimos ler depois de 3 tentativas — parar o app em vez de
+    # a planilha EXISTE mas não conseguimos ler depois de 3 tentativas — parar o app em vez de
     # seguir com um estado em branco (que apagaria seus dados reais no próximo save).
     st.error(
-        "Existe um arquivo de dados no seu Drive, mas não consegui lê-lo depois de várias "
+        "Existe uma planilha de dados no seu Drive, mas não consegui lê-la depois de várias "
         f"tentativas — por segurança, o app parou aqui para não arriscar sobrescrever nada. "
         f"Recarregue a página em alguns instantes. Detalhe técnico: {last_error}"
     )
@@ -638,21 +682,17 @@ def load_state() -> dict:
 
 
 def save_state(state: dict) -> bool:
-    """Salva o estado no Drive, com algumas tentativas em caso de falha de rede.
-    Retorna True se salvou com sucesso."""
-    payload = json.dumps(state, ensure_ascii=False).encode("utf-8")
+    """Salva o estado na planilha do Drive, com algumas tentativas em caso de
+    falha de rede. Retorna True se salvou com sucesso."""
+    payload = json.dumps(state, ensure_ascii=False)
     last_error = None
     for attempt in range(3):
         try:
-            media = MediaIoBaseUpload(io.BytesIO(payload), mimetype="application/json", resumable=False)
-            file_id = st.session_state.get("_gdrive_file_id") or _find_state_file_id()
-            if file_id:
-                drive.files().update(fileId=file_id, media_body=media).execute()
-            else:
-                metadata = {"name": STATE_FILENAME, "parents": [GDRIVE_FOLDER_ID]}
-                created = drive.files().create(body=metadata, media_body=media, fields="id").execute()
-                file_id = created["id"]
-            st.session_state["_gdrive_file_id"] = file_id
+            spreadsheet_id = st.session_state.get("_gsheet_id") or _find_state_spreadsheet_id()
+            if not spreadsheet_id:
+                spreadsheet_id = _create_state_spreadsheet()
+            _write_state_payload(spreadsheet_id, payload)
+            st.session_state["_gsheet_id"] = spreadsheet_id
             st.session_state["_save_failed"] = False
             st.session_state["_last_saved_at"] = datetime.now().strftime("%H:%M:%S")
             return True
@@ -668,10 +708,11 @@ def save_state(state: dict) -> bool:
     return False
 
 
-if drive is None:
+if drive is None or sheets_api is None:
     st.error(
-        "Faltam as credenciais do Google Drive. Configure `GDRIVE_FOLDER_ID` e "
-        "`[gdrive_service_account]` em `.streamlit/secrets.toml` (veja o README.md)."
+        "Faltam as credenciais do Google. Configure `GDRIVE_FOLDER_ID` e "
+        "`[gdrive_service_account]` em `.streamlit/secrets.toml`, e confirme que a Google Sheets API "
+        "está ativada no seu projeto do Google Cloud (veja o README.md)."
     )
     st.stop()
 
