@@ -301,27 +301,27 @@ def render_meus_editais(state: dict):
 
             b1, b2, b3, b4 = st.columns(4)
             with b1:
-                if st.button("🤔 Avaliando", key=f"st_aval_{ed['id']}", use_container_width=True):
+                if st.button("🤔 Avaliando", key=f"st_aval_{ed['id']}", width="stretch"):
                     ed["status"] = "Avaliando"
                     changed = True
             with b2:
-                if st.button("✅ Vou fazer", key=f"st_conf_{ed['id']}", use_container_width=True):
+                if st.button("✅ Vou fazer", key=f"st_conf_{ed['id']}", width="stretch"):
                     ed["status"] = "Confirmado"
                     changed = True
             with b3:
-                if st.button("❌ Não vou fazer", key=f"st_desc_{ed['id']}", use_container_width=True):
+                if st.button("❌ Não vou fazer", key=f"st_desc_{ed['id']}", width="stretch"):
                     ed["status"] = "Descartado"
                     changed = True
             with b4:
-                if st.button("📂 Abrir no Painel", key=f"open_{ed['id']}", use_container_width=True):
+                if st.button("📂 Abrir no Painel", key=f"open_{ed['id']}", width="stretch"):
                     state["currentEditalId"] = ed["id"]
                     st.session_state.page = "Painel"
-                    save_state(state)
-                    st.rerun()
+                    if save_state(state):
+                        st.rerun()
 
             if changed:
-                save_state(state)
-                st.rerun()
+                if save_state(state):
+                    st.rerun()
 
 
 def _norm(s) -> str:
@@ -726,14 +726,14 @@ with st.sidebar:
                 }
                 editais.append(ed)
                 state["currentEditalId"] = ed["id"]
-                save_state(state)
-                st.rerun()
+                if save_state(state):
+                    st.rerun()
 
-    if current_edital and st.button("🗑️ Excluir edital atual", use_container_width=True):
+    if current_edital and st.button("🗑️ Excluir edital atual", width="stretch"):
         state["editais"] = [e for e in editais if e["id"] != current_edital["id"]]
         state["currentEditalId"] = state["editais"][0]["id"] if state["editais"] else None
-        save_state(state)
-        st.rerun()
+        if save_state(state):
+            st.rerun()
 
     st.divider()
     last_saved = st.session_state.get("_last_saved_at")
@@ -743,10 +743,10 @@ with st.sidebar:
         st.caption(f"☁️ Salvo no Drive às {last_saved}")
     else:
         st.caption("☁️ Nada alterado ainda nesta sessão.")
-    if st.button("💾 Salvar agora", use_container_width=True, help="Força um salvamento imediato no Google Drive."):
+    if st.button("💾 Salvar agora", width="stretch", help="Força um salvamento imediato no Google Drive."):
         if save_state(state):
             st.toast("Dados salvos no Google Drive ✓")
-        st.rerun()
+            st.rerun()
 
 page = st.session_state.page
 
@@ -987,7 +987,7 @@ if page == "Painel":
 
                     if s.get("link"):
                         with st.expander("Tentar abrir aqui dentro do site"):
-                            st.components.v1.iframe(s["link"], height=500)
+                            st.iframe(s["link"], height=500)
                             st.caption(
                                 "Se a tela acima aparecer em branco, o TEC Concursos está bloqueando a "
                                 "incorporação por segurança — use o botão 'Estudar no TEC' acima, que abre em nova guia."
@@ -1012,8 +1012,8 @@ if page == "Painel":
                                     today_str = date.today().isoformat()
                                     state["dailyActivity"][today_str] = state["dailyActivity"].get(today_str, 0) + (p_done - done)
                                 ed_log[key] = {"done": p_done, "correct": min(p_correct, p_done)}
-                                save_state(state)
-                                st.rerun()
+                                if save_state(state):
+                                    st.rerun()
 
                     if new_done != done or new_correct != correct:
                         wk_log = state["weeklyLog"].setdefault(wk["key"], {})
@@ -1035,7 +1035,7 @@ if page == "Painel":
                 </div>""",
                 unsafe_allow_html=True,
             )
-            if st.button("Ver dashboard completo →", use_container_width=True):
+            if st.button("Ver dashboard completo →", width="stretch"):
                 st.session_state.page = "Dashboard"
                 st.rerun()
 
@@ -1205,7 +1205,7 @@ elif page == "Timer":
       tecRender();
     </script>
     """
-    st.components.v1.html(timer_html, height=380)
+    st.iframe(timer_html, height=380)
     st.caption(
         "O timer é só um relógio — ele não grava nada sozinho. Depois de estudar, registre as questões "
         "feitas normalmente no card da matéria (ou cole o contador do TEC) para contar pro seu progresso."
@@ -1221,8 +1221,8 @@ elif page == "Matérias & Pesos":
     )
     if int(new_goal_val) != total_goal:
         current_edital["weeklyTotalGoal"] = int(new_goal_val)
-        save_state(state)
-        st.rerun()
+        if save_state(state):
+            st.rerun()
 
     st.caption(
         "Edite direto na tabela. Para adicionar uma matéria, use a última linha em branco. "
@@ -1249,7 +1249,7 @@ elif page == "Matérias & Pesos":
     edited = st.data_editor(
         df,
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch",
         key=f"editor_{current_edital['id']}",
         column_config={
             "Peso": st.column_config.NumberColumn("Peso", min_value=1, max_value=10, step=0.5),
@@ -1292,7 +1292,7 @@ elif page == "Matérias & Pesos":
             ]
         )
         st.markdown("**Distribuição calculada da meta semanal:**")
-        st.dataframe(preview, use_container_width=True, hide_index=True)
+        st.dataframe(preview, width="stretch", hide_index=True)
 
 # ----------------------------------------------------------------------------
 # Página: Importar planilha
@@ -1385,7 +1385,7 @@ elif page == "Importar planilha":
                             "itens_previstos": "Itens Previstos", "classificacao": "Classificação", "link": "Link TEC",
                         }
                     ),
-                    use_container_width=True,
+                    width="stretch",
                     hide_index=True,
                 )
 
@@ -1407,8 +1407,8 @@ elif page == "Importar planilha":
                             if r.get("done"):
                                 k = subject_key(r["materia"], r.get("assunto", ""))
                                 ed_log[k] = {"done": r["done"], "correct": r.get("correct", 0)}
-                    save_state(state)
-                    st.rerun()
+                    if save_state(state):
+                        st.rerun()
 
                 clean_imported = [
                     {
@@ -1509,4 +1509,4 @@ elif page == "Dashboard":
                 "Acerto": f"{round(100*c_/d)}%" if d else "—",
             }
         )
-    st.dataframe(pd.DataFrame(perf_rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(perf_rows), width="stretch", hide_index=True)
