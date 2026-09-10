@@ -13,6 +13,7 @@ import io
 import json
 import math
 import re
+import time
 import unicodedata
 import uuid
 from datetime import date, datetime, timedelta
@@ -61,6 +62,10 @@ BORDER = "#E7E9F3"
 TEXT = "#1E2432"
 MUTED = "#8A93A6"
 PALETTE = [ACCENT, GREEN, PURPLE, AMBER, "#EC4899", "#14B8A6"]
+_TIMER_BTN_CSS = (
+    f"background:{BG}; color:{TEXT}; border:1px solid {BORDER}; padding:10px 16px; "
+    f"border-radius:12px; font-weight:600; font-size:13px; cursor:pointer;"
+)
 
 CUSTOM_CSS = f"""
 <style>
@@ -206,6 +211,117 @@ def weekly_goal_for(subject: dict, total_goal: int, sum_weights: float) -> int:
     if not total_goal or not sum_weights:
         return 0
     return max(1, round(total_goal * subject.get("peso", 1) / sum_weights))
+
+
+STATUS_OPTIONS = ["Avaliando", "Confirmado", "Descartado"]
+STATUS_COLORS = {"Avaliando": "#8A93A6", "Confirmado": "#22C55E", "Descartado": "#C4C9D4"}
+
+
+def _countdown_caption(date_str: str, label_futuro: str, label_passado: str):
+    d = days_until(date_str)
+    if d is None:
+        return None
+    if d >= 0:
+        return f"⏳ {d} dias {label_futuro}"
+    return label_passado
+
+
+def render_meus_editais(state: dict):
+    st.markdown("# 📋 Meus Editais")
+    st.caption(
+        "Cadastre quantos editais quiser (use '➕ Novo edital' na barra lateral), acompanhe prazos "
+        "de prova e de inscrição, e confirme quais vai levar a sério."
+    )
+    editais = state["editais"]
+    if not editais:
+        st.info("Nenhum edital cadastrado ainda. Use '➕ Novo edital' na barra lateral para começar.")
+        return
+
+    for ed in editais:
+        ed.setdefault("inscricaoPrazo", "")
+        ed.setdefault("inscrito", False)
+        ed.setdefault("inscricaoPaga", False)
+        ed.setdefault("status", "Avaliando")
+
+        with st.container(border=True):
+            title_col, status_col = st.columns([3, 2])
+            with title_col:
+                st.markdown(f"### {ed['name']}")
+                prova_txt = _countdown_caption(ed.get("provaDate"), "até a prova", "✅ Prova já realizada")
+                if prova_txt:
+                    st.caption(prova_txt)
+                if ed.get("inscricaoPrazo"):
+                    d = days_until(ed["inscricaoPrazo"])
+                    if d is not None:
+                        insc_txt = (
+                            f"📝 Faltam {d} dias para o fim da inscrição" if d >= 0 else "🔒 Inscrições encerradas"
+                        )
+                        st.caption(insc_txt)
+            with status_col:
+                color = STATUS_COLORS.get(ed.get("status", "Avaliando"), "#8A93A6")
+                st.markdown(
+                    f'<div style="text-align:right; padding-top:6px;">'
+                    f'<span class="class-badge" style="background:{color}22; color:{color};">'
+                    f'{ed.get("status", "Avaliando")}</span></div>',
+                    unsafe_allow_html=True,
+                )
+
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                new_inscrito = st.checkbox("Já me inscrevi", value=ed.get("inscrito", False), key=f"insc_{ed['id']}")
+            with c2:
+                new_pago = st.checkbox(
+                    "Já paguei a inscrição", value=ed.get("inscricaoPaga", False),
+                    key=f"pago_{ed['id']}", disabled=not new_inscrito,
+                )
+            with c3:
+                prazo_atual = None
+                if ed.get("inscricaoPrazo"):
+                    try:
+                        prazo_atual = datetime.strptime(ed["inscricaoPrazo"], "%Y-%m-%d").date()
+                    except ValueError:
+                        prazo_atual = None
+                new_prazo = st.date_input("Prazo de inscrição", value=prazo_atual, key=f"prazo_{ed['id']}")
+
+            changed = False
+            if new_inscrito != ed.get("inscrito", False):
+                ed["inscrito"] = new_inscrito
+                changed = True
+            if not new_inscrito:
+                if ed.get("inscricaoPaga"):
+                    ed["inscricaoPaga"] = False
+                    changed = True
+            elif new_pago != ed.get("inscricaoPaga", False):
+                ed["inscricaoPaga"] = new_pago
+                changed = True
+            new_prazo_str = new_prazo.isoformat() if new_prazo else ""
+            if new_prazo_str != ed.get("inscricaoPrazo", ""):
+                ed["inscricaoPrazo"] = new_prazo_str
+                changed = True
+
+            b1, b2, b3, b4 = st.columns(4)
+            with b1:
+                if st.button("🤔 Avaliando", key=f"st_aval_{ed['id']}", use_container_width=True):
+                    ed["status"] = "Avaliando"
+                    changed = True
+            with b2:
+                if st.button("✅ Vou fazer", key=f"st_conf_{ed['id']}", use_container_width=True):
+                    ed["status"] = "Confirmado"
+                    changed = True
+            with b3:
+                if st.button("❌ Não vou fazer", key=f"st_desc_{ed['id']}", use_container_width=True):
+                    ed["status"] = "Descartado"
+                    changed = True
+            with b4:
+                if st.button("📂 Abrir no Painel", key=f"open_{ed['id']}", use_container_width=True):
+                    state["currentEditalId"] = ed["id"]
+                    st.session_state.page = "Painel"
+                    save_state(state)
+                    st.rerun()
+
+            if changed:
+                save_state(state)
+                st.rerun()
 
 
 def _norm(s) -> str:
@@ -474,42 +590,82 @@ def _find_state_file_id():
 
 
 def load_state() -> dict:
+    """Carrega o estado do Drive. Se o arquivo existe mas não consegue ser
+    baixado (ex.: falha de rede), NUNCA retorna um estado em branco — isso
+    poderia acabar sobrescrevendo dados reais no primeiro save_state(). Em
+    vez disso, para o app com um erro bem visível para tentar de novo."""
     try:
         file_id = _find_state_file_id()
-        if not file_id:
-            # ainda não existe — será criado no primeiro save_state()
-            return {k: (type(v)() if isinstance(v, (list, dict)) else v) for k, v in DEFAULT_STATE.items()}
-        request = drive.files().get_media(fileId=file_id)
-        buf = io.BytesIO()
-        downloader = MediaIoBaseDownload(buf, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        buf.seek(0)
-        loaded = json.loads(buf.read().decode("utf-8"))
-        for k, v in DEFAULT_STATE.items():
-            loaded.setdefault(k, v if not isinstance(v, (list, dict)) else type(v)())
-        st.session_state["_gdrive_file_id"] = file_id
-        return loaded
     except Exception as e:
-        st.warning(f"Não foi possível carregar seus dados salvos: {e}")
+        st.error(
+            f"Não foi possível conectar ao Google Drive para carregar seus dados. "
+            f"Recarregue a página em alguns instantes. ({e})"
+        )
+        st.stop()
+
+    if not file_id:
+        # não existe arquivo ainda — primeira vez usando o app, estado em branco é seguro
         return {k: (type(v)() if isinstance(v, (list, dict)) else v) for k, v in DEFAULT_STATE.items()}
 
+    last_error = None
+    for attempt in range(3):
+        try:
+            request = drive.files().get_media(fileId=file_id)
+            buf = io.BytesIO()
+            downloader = MediaIoBaseDownload(buf, request)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+            buf.seek(0)
+            loaded = json.loads(buf.read().decode("utf-8"))
+            for k, v in DEFAULT_STATE.items():
+                loaded.setdefault(k, v if not isinstance(v, (list, dict)) else type(v)())
+            st.session_state["_gdrive_file_id"] = file_id
+            st.session_state["_last_loaded_ok"] = True
+            return loaded
+        except Exception as e:
+            last_error = e
+            time.sleep(1.5)
 
-def save_state(state: dict):
-    try:
-        payload = json.dumps(state, ensure_ascii=False).encode("utf-8")
-        media = MediaIoBaseUpload(io.BytesIO(payload), mimetype="application/json", resumable=False)
-        file_id = st.session_state.get("_gdrive_file_id") or _find_state_file_id()
-        if file_id:
-            drive.files().update(fileId=file_id, media_body=media).execute()
-        else:
-            metadata = {"name": STATE_FILENAME, "parents": [GDRIVE_FOLDER_ID]}
-            created = drive.files().create(body=metadata, media_body=media, fields="id").execute()
-            file_id = created["id"]
-        st.session_state["_gdrive_file_id"] = file_id
-    except Exception as e:
-        st.warning(f"Não foi possível salvar agora — verifique sua conexão. ({e})")
+    # o arquivo EXISTE mas não conseguimos ler depois de 3 tentativas — parar o app em vez de
+    # seguir com um estado em branco (que apagaria seus dados reais no próximo save).
+    st.error(
+        "Existe um arquivo de dados no seu Drive, mas não consegui lê-lo depois de várias "
+        f"tentativas — por segurança, o app parou aqui para não arriscar sobrescrever nada. "
+        f"Recarregue a página em alguns instantes. Detalhe técnico: {last_error}"
+    )
+    st.stop()
+
+
+def save_state(state: dict) -> bool:
+    """Salva o estado no Drive, com algumas tentativas em caso de falha de rede.
+    Retorna True se salvou com sucesso."""
+    payload = json.dumps(state, ensure_ascii=False).encode("utf-8")
+    last_error = None
+    for attempt in range(3):
+        try:
+            media = MediaIoBaseUpload(io.BytesIO(payload), mimetype="application/json", resumable=False)
+            file_id = st.session_state.get("_gdrive_file_id") or _find_state_file_id()
+            if file_id:
+                drive.files().update(fileId=file_id, media_body=media).execute()
+            else:
+                metadata = {"name": STATE_FILENAME, "parents": [GDRIVE_FOLDER_ID]}
+                created = drive.files().create(body=metadata, media_body=media, fields="id").execute()
+                file_id = created["id"]
+            st.session_state["_gdrive_file_id"] = file_id
+            st.session_state["_save_failed"] = False
+            st.session_state["_last_saved_at"] = datetime.now().strftime("%H:%M:%S")
+            return True
+        except Exception as e:
+            last_error = e
+            time.sleep(1.0)
+
+    st.session_state["_save_failed"] = True
+    st.error(
+        f"⚠️ Não consegui salvar agora, mesmo depois de tentar de novo — verifique sua conexão "
+        f"e tente o botão 'Salvar agora' na barra lateral antes de fechar a aba. ({last_error})"
+    )
+    return False
 
 
 if drive is None:
@@ -525,9 +681,9 @@ if "state" not in st.session_state:
 state = st.session_state.state
 user_label = APP_OWNER_NAME
 
-PAGES = ["Painel", "Matérias & Pesos", "Importar planilha", "Dashboard"]
+PAGES = ["Meus Editais", "Painel", "Timer", "Matérias & Pesos", "Importar planilha", "Dashboard"]
 if "page" not in st.session_state:
-    st.session_state.page = "Painel"
+    st.session_state.page = "Meus Editais"
 
 # ----------------------------------------------------------------------------
 # Barra lateral — navegação e editais
@@ -579,12 +735,23 @@ with st.sidebar:
         save_state(state)
         st.rerun()
 
-if not current_edital:
-    st.info("Crie um edital na barra lateral para começar.")
-    st.stop()
+    st.divider()
+    last_saved = st.session_state.get("_last_saved_at")
+    if st.session_state.get("_save_failed"):
+        st.error("⚠️ Última tentativa de salvar falhou.")
+    elif last_saved:
+        st.caption(f"☁️ Salvo no Drive às {last_saved}")
+    else:
+        st.caption("☁️ Nada alterado ainda nesta sessão.")
+    if st.button("💾 Salvar agora", use_container_width=True, help="Força um salvamento imediato no Google Drive."):
+        if save_state(state):
+            st.toast("Dados salvos no Google Drive ✓")
+        st.rerun()
+
+page = st.session_state.page
 
 # ----------------------------------------------------------------------------
-# Barra superior
+# Barra superior (sempre visível)
 # ----------------------------------------------------------------------------
 
 top_l, top_r = st.columns([5, 2])
@@ -606,17 +773,29 @@ with top_r:
     with c2:
         st.markdown(f'<div class="avatar-chip">{user_label[0].upper()}</div>', unsafe_allow_html=True)
 
+# páginas que não dependem de um edital "atual" selecionado
+PAGES_SEM_EDITAL = {"Meus Editais", "Timer"}
+
+if page not in PAGES_SEM_EDITAL and not current_edital:
+    st.info("Crie um edital na barra lateral (ou na aba **Meus Editais**) para começar.")
+    st.stop()
+
+if page == "Meus Editais":
+    render_meus_editais(state)
+    st.stop()
+
 # ----------------------------------------------------------------------------
-# Cabeçalho do edital
+# Cabeçalho do edital (páginas que dependem de um edital selecionado)
 # ----------------------------------------------------------------------------
 
-st.markdown(f"# {current_edital['name']}")
-remaining = days_until(current_edital.get("provaDate"))
-if remaining is not None:
-    st.caption(f"⏳ {remaining} dias até a prova" if remaining >= 0 else "✅ Prova já realizada")
+if page != "Timer":
+    st.markdown(f"# {current_edital['name']}")
+    remaining = days_until(current_edital.get("provaDate"))
+    if remaining is not None:
+        st.caption(f"⏳ {remaining} dias até a prova" if remaining >= 0 else "✅ Prova já realizada")
 
-subjects = current_edital.get("subjects", [])
-total_goal = current_edital.get("weeklyTotalGoal", 0)
+subjects = current_edital.get("subjects", []) if current_edital else []
+total_goal = current_edital.get("weeklyTotalGoal", 0) if current_edital else 0
 sum_weights = sum(s.get("peso", 1) for s in subjects) or 1
 
 if search_query:
@@ -624,8 +803,6 @@ if search_query:
     visible_subjects = [s for s in subjects if q in s["materia"].lower() or q in s.get("assunto", "").lower()]
 else:
     visible_subjects = subjects
-
-page = st.session_state.page
 
 # ----------------------------------------------------------------------------
 # Página: Painel
@@ -877,6 +1054,162 @@ if page == "Painel":
                     st.bar_chart(perf_df, color=GREEN)
                 else:
                     st.caption("Registre questões feitas para ver o aproveitamento por matéria.")
+
+# ----------------------------------------------------------------------------
+# Página: Timer
+# ----------------------------------------------------------------------------
+
+elif page == "Timer":
+    st.markdown("### ⏱️ Timer de Estudo")
+    st.caption(
+        "Deixe esta aba aberta na sua segunda tela. O timer roda direto no navegador — continua "
+        "contando mesmo trocando de aba dentro do app — mas reinicia se você recarregar a página."
+    )
+
+    subject_options = ["(sem matéria específica)"] + [
+        f"{s['materia']} · {s['assunto']}" if s.get("assunto") else s["materia"]
+        for s in (current_edital.get("subjects", []) if current_edital else [])
+    ]
+    chosen_subject = st.selectbox("Estudando agora:", subject_options, key="timer_subject_select")
+
+    timer_html = f"""
+    <div style="font-family:Arial, sans-serif; background:{CARD}; border:1px solid {BORDER};
+                border-radius:18px; padding:28px; text-align:center; color:{TEXT};">
+      <div id="tec-subject" style="font-size:13px; color:{MUTED}; margin-bottom:6px; text-transform:uppercase;
+                letter-spacing:0.05em;">{chosen_subject}</div>
+      <div id="tec-display" style="font-size:76px; font-weight:800; letter-spacing:2px; color:{ACCENT};
+                font-variant-numeric:tabular-nums; margin-bottom:6px;">25:00</div>
+      <div id="tec-mode-label" style="font-size:13px; color:{MUTED}; margin-bottom:18px;">Foco — 25 min</div>
+
+      <div style="display:flex; gap:10px; justify-content:center; margin-bottom:14px; flex-wrap:wrap;">
+        <button onclick="tecPreset(25)" style="{_TIMER_BTN_CSS}">Foco 25min</button>
+        <button onclick="tecPreset(50)" style="{_TIMER_BTN_CSS}">Foco 50min</button>
+        <button onclick="tecPreset(5)" style="{_TIMER_BTN_CSS}">Pausa 5min</button>
+        <button onclick="tecPreset(15)" style="{_TIMER_BTN_CSS}">Pausa 15min</button>
+      </div>
+
+      <div style="display:flex; gap:10px; justify-content:center; align-items:center; margin-bottom:16px; flex-wrap:wrap;">
+        <input id="tec-custom" type="number" min="1" max="240" placeholder="min" style="width:70px; padding:8px;
+                border-radius:10px; border:1px solid {BORDER}; text-align:center;">
+        <button onclick="tecCustom()" style="{_TIMER_BTN_CSS}">Definir</button>
+        <label style="font-size:13px; color:{MUTED}; display:flex; align-items:center; gap:6px;">
+          <input type="checkbox" id="tec-countup" onchange="tecToggleMode()"> Cronômetro (contagem crescente)
+        </label>
+      </div>
+
+      <div style="display:flex; gap:10px; justify-content:center;">
+        <button id="tec-startpause" onclick="tecStartPause()"
+                style="background:{ACCENT}; color:#fff; border:none; padding:12px 28px; border-radius:12px;
+                       font-weight:700; font-size:15px; cursor:pointer;">▶ Iniciar</button>
+        <button onclick="tecReset()" style="{_TIMER_BTN_CSS}">↺ Zerar</button>
+      </div>
+    </div>
+
+    <script>
+      let tecTotal = 25*60;
+      let tecRemaining = tecTotal;
+      let tecElapsed = 0;
+      let tecRunning = false;
+      let tecCountUp = false;
+      let tecInterval = null;
+
+      function tecFormat(s) {{
+        const m = Math.floor(Math.abs(s)/60).toString().padStart(2,'0');
+        const sec = Math.abs(s % 60).toString().padStart(2,'0');
+        return m + ":" + sec;
+      }}
+
+      function tecRender() {{
+        const display = document.getElementById('tec-display');
+        const modeLabel = document.getElementById('tec-mode-label');
+        if (tecCountUp) {{
+          display.textContent = tecFormat(tecElapsed);
+          modeLabel.textContent = "Cronômetro em andamento";
+        }} else {{
+          display.textContent = tecFormat(tecRemaining);
+          modeLabel.textContent = tecRunning ? "Contando..." : "Pausado";
+        }}
+      }}
+
+      function tecTick() {{
+        if (tecCountUp) {{
+          tecElapsed += 1;
+          tecRender();
+        }} else {{
+          if (tecRemaining > 0) {{
+            tecRemaining -= 1;
+            tecRender();
+          }} else {{
+            clearInterval(tecInterval);
+            tecRunning = false;
+            document.getElementById('tec-startpause').textContent = "▶ Iniciar";
+            document.title = "⏰ Tempo esgotado!";
+            tecBeep();
+          }}
+        }}
+      }}
+
+      function tecStartPause() {{
+        tecRunning = !tecRunning;
+        const btn = document.getElementById('tec-startpause');
+        if (tecRunning) {{
+          btn.textContent = "⏸ Pausar";
+          tecInterval = setInterval(tecTick, 1000);
+        }} else {{
+          btn.textContent = "▶ Iniciar";
+          clearInterval(tecInterval);
+        }}
+      }}
+
+      function tecReset() {{
+        clearInterval(tecInterval);
+        tecRunning = false;
+        tecRemaining = tecTotal;
+        tecElapsed = 0;
+        document.getElementById('tec-startpause').textContent = "▶ Iniciar";
+        document.title = "Coach de Estudos";
+        tecRender();
+      }}
+
+      function tecPreset(min) {{
+        tecTotal = min*60;
+        document.getElementById('tec-countup').checked = false;
+        tecCountUp = false;
+        tecReset();
+      }}
+
+      function tecCustom() {{
+        const v = parseInt(document.getElementById('tec-custom').value, 10);
+        if (v > 0) {{ tecPreset(v); }}
+      }}
+
+      function tecToggleMode() {{
+        tecCountUp = document.getElementById('tec-countup').checked;
+        tecReset();
+      }}
+
+      function tecBeep() {{
+        try {{
+          const ctx = new (window.AudioContext || window.webkitAudioContext)();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.frequency.value = 880;
+          gain.gain.value = 0.15;
+          osc.start();
+          setTimeout(() => {{ osc.stop(); ctx.close(); }}, 700);
+        }} catch (e) {{}}
+      }}
+
+      tecRender();
+    </script>
+    """
+    st.components.v1.html(timer_html, height=380)
+    st.caption(
+        "O timer é só um relógio — ele não grava nada sozinho. Depois de estudar, registre as questões "
+        "feitas normalmente no card da matéria (ou cole o contador do TEC) para contar pro seu progresso."
+    )
 
 # ----------------------------------------------------------------------------
 # Página: Matérias & Pesos
