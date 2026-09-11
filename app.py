@@ -333,7 +333,7 @@ def render_meus_editais(state: dict):
             with b4:
                 if st.button("📂 Abrir no Painel", key=f"open_{ed['id']}", width="stretch"):
                     state["currentEditalId"] = ed["id"]
-                    st.session_state.page = "Painel"
+                    _go_to_page("Painel")
                     if save_state(state):
                         st.rerun()
 
@@ -348,22 +348,37 @@ def _norm(s) -> str:
     return "".join(c for c in unicodedata.normalize("NFKD", s) if not unicodedata.combining(c))
 
 
+def _go_to_page(page_name: str):
+    """Muda de página programaticamente (ex.: um botão que leva pro Dashboard).
+    É preciso setar tanto `page` quanto a chave do próprio widget de rádio da
+    barra lateral ("page_radio") — senão o rádio, que tem memória própria,
+    sobrescreve a mudança de volta pra página em que já estava."""
+    st.session_state.page = page_name
+    st.session_state["page_radio"] = page_name
+
+
 def parse_tec_counter(text: str):
     """Extrai (respondidas, acertos, erros) de um texto colado do contador do
-    TEC Concursos, ex.: "1 de 964 (1 R, 1 A e 0 E)". Retorna None se não
-    conseguir reconhecer o padrão."""
+    TEC Concursos. Reconhece tanto o formato antigo, ex.: "1 de 964 (1 R, 1 A
+    e 0 E)", quanto o novo, ex.: "3 Resolvidas, 1 Acertos e 2 Erros". Retorna
+    None se não conseguir reconhecer o padrão."""
     if not text:
         return None
     m = re.search(r"\(([^)]*)\)", text)
-    inner = m.group(1) if m else text
-    r_m = re.search(r"(\d+)\s*R\b", inner, re.IGNORECASE)
-    a_m = re.search(r"(\d+)\s*A\b", inner, re.IGNORECASE)
-    e_m = re.search(r"(\d+)\s*E\b", inner, re.IGNORECASE)
-    if not r_m or not a_m:
+    scope = m.group(1) if m else text
+
+    def _find(word_pattern):
+        m2 = re.search(rf"(\d+)\s*(?:{word_pattern})", scope, re.IGNORECASE)
+        return int(m2.group(1)) if m2 else None
+
+    respondidas = _find(r"resolvidas?|respondidas?|r\b")
+    acertos = _find(r"acertos?|a\b")
+    erros = _find(r"erros?|e\b")
+
+    if respondidas is None or acertos is None:
         return None
-    respondidas = int(r_m.group(1))
-    acertos = int(a_m.group(1))
-    erros = int(e_m.group(1)) if e_m else max(respondidas - acertos, 0)
+    if erros is None:
+        erros = max(respondidas - acertos, 0)
     return respondidas, acertos, erros
 
 
@@ -748,9 +763,9 @@ else:
 
 state = full_state["users"][username]
 
-PAGES = ["Meus Editais", "Painel", "Timer", "Matérias & Pesos", "Importar planilha", "Dashboard"]
+PAGES = ["Painel", "Dashboard", "Timer", "Meus Editais", "Matérias & Pesos", "Importar planilha"]
 if "page" not in st.session_state:
-    st.session_state.page = "Meus Editais"
+    st.session_state.page = "Painel"
 
 # ----------------------------------------------------------------------------
 # Barra lateral — navegação e editais
@@ -892,11 +907,11 @@ if page == "Painel":
     elif not subjects:
         st.warning("Cadastre matérias na aba **Matérias & Pesos** ou importe uma planilha.")
     else:
-        # ---- coach: recomendação única, só na semana atual ----
+        # ---- coach: recomendação, só na semana atual, com opção de gerar outra ----
         if offset == 0:
             dow = date.today().isoweekday()
             max_weight = max(s.get("peso", 1) for s in subjects)
-            best = None
+            candidates = []
             for s in subjects:
                 key = subject_key(s["materia"], s.get("assunto", ""))
                 goal = weekly_goal_for(s, total_goal, sum_weights)
@@ -914,10 +929,15 @@ if page == "Painel":
                     reason = "atrasado em relação à meta semanal"
                 elif accuracy is not None and accuracy < 0.6:
                     reason = "aproveitamento baixo — vale reforçar"
-                if best is None or score > best["score"]:
-                    best = {"subject": s, "score": score, "reason": reason}
+                candidates.append({"subject": s, "score": score, "reason": reason})
 
-            if best:
+            candidates.sort(key=lambda c: -c["score"])
+
+            if candidates:
+                coach_idx_key = f"coach_idx_{current_edital['id']}"
+                st.session_state.setdefault(coach_idx_key, 0)
+                idx = st.session_state[coach_idx_key] % len(candidates)
+                best = candidates[idx]
                 s = best["subject"]
                 st.markdown(
                     f"""<div class="coach-card">
@@ -928,8 +948,14 @@ if page == "Painel":
                     </div>""",
                     unsafe_allow_html=True,
                 )
-                if s.get("link"):
-                    st.link_button("Abrir no TEC ↗", s["link"])
+                bcol1, bcol2 = st.columns([2, 1])
+                with bcol1:
+                    if s.get("link"):
+                        st.link_button("Abrir no TEC ↗", s["link"])
+                with bcol2:
+                    if len(candidates) > 1 and st.button("🔄 Sugerir outra matéria", key=f"coach_next_{current_edital['id']}"):
+                        st.session_state[coach_idx_key] = (idx + 1) % len(candidates)
+                        st.rerun()
 
         total_done = sum(week_data.get(subject_key(s["materia"], s.get("assunto", "")), {}).get("done", 0) for s in subjects)
         total_correct = sum(week_data.get(subject_key(s["materia"], s.get("assunto", "")), {}).get("correct", 0) for s in subjects)
@@ -1058,32 +1084,68 @@ if page == "Painel":
                                 st.link_button("Estudar no TEC ↗", s["link"])
 
                     if s.get("link"):
-                        with st.expander("Tentar abrir aqui dentro do site"):
-                            st.iframe(s["link"], height=500)
-                            st.caption(
-                                "Se a tela acima aparecer em branco, o TEC Concursos está bloqueando a "
-                                "incorporação por segurança — use o botão 'Estudar no TEC' acima, que abre em nova guia."
-                            )
-
-                    with st.expander("📋 Colar contador do TEC"):
                         st.caption(
-                            "Copie o textinho do TEC (ex.: **1 de 964 (1 R, 1 A e 0 E)**) e cole abaixo — "
-                            "o app extrai Feitas e Acertos automaticamente."
+                            "O TEC Concursos bloqueia a incorporação da página dele por segurança "
+                            "(proteção padrão de sites com login) — por isso não dá pra mostrar a "
+                            "questão aqui dentro do app. Use o botão 'Estudar no TEC' acima, que abre "
+                            "em nova guia."
                         )
-                        paste_key = f"tec_paste_{current_edital['id']}_{wk['key']}_{widget_id}"
-                        pasted = st.text_input("Colar aqui", key=paste_key, placeholder="1 de 964 (1 R, 1 A e 0 E)")
-                        if st.button("Aplicar", key=f"apply_{paste_key}"):
-                            parsed = parse_tec_counter(pasted)
-                            if not parsed:
-                                st.error("Não reconheci esse formato. Confira se copiou o trecho com R, A e E.")
-                            else:
-                                p_done, p_correct, _p_wrong = parsed
+
+                    with st.expander("📋 Registrar progresso do TEC"):
+                        tab_paste, tab_manual = st.tabs(["Colar texto", "Digitar valores"])
+
+                        with tab_paste:
+                            st.caption(
+                                "Copie o textinho do TEC (ex.: **3 Resolvidas, 1 Acertos e 2 Erros** "
+                                "ou **1 de 964 (1 R, 1 A e 0 E)**) e cole abaixo — o app extrai Feitas "
+                                "e Acertos automaticamente."
+                            )
+                            paste_key = f"tec_paste_{current_edital['id']}_{wk['key']}_{widget_id}"
+                            pasted = st.text_input(
+                                "Colar aqui", key=paste_key, placeholder="3 Resolvidas, 1 Acertos e 2 Erros"
+                            )
+                            if st.button("Aplicar", key=f"apply_{paste_key}"):
+                                parsed = parse_tec_counter(pasted)
+                                if not parsed:
+                                    st.error("Não reconheci esse formato. Confira se copiou o trecho certo.")
+                                else:
+                                    p_done, p_correct, _p_wrong = parsed
+                                    wk_log = state["weeklyLog"].setdefault(wk["key"], {})
+                                    ed_log = wk_log.setdefault(current_edital["id"], {})
+                                    if offset == 0 and p_done > done:
+                                        today_str = date.today().isoformat()
+                                        state["dailyActivity"][today_str] = state["dailyActivity"].get(today_str, 0) + (p_done - done)
+                                    ed_log[key] = {"done": p_done, "correct": min(p_correct, p_done)}
+                                    if save_state(state):
+                                        st.rerun()
+
+                        with tab_manual:
+                            st.caption("Digite os valores direto, do jeito que aparecem no TEC.")
+                            mc1, mc2, mc3 = st.columns(3)
+                            with mc1:
+                                m_resp = st.number_input(
+                                    "Resolvidas", min_value=0, value=int(done),
+                                    key=f"manual_resp_{current_edital['id']}_{wk['key']}_{widget_id}",
+                                )
+                            with mc2:
+                                m_acer = st.number_input(
+                                    "Acertos", min_value=0, max_value=max(int(m_resp), 0),
+                                    value=min(int(correct), int(m_resp)),
+                                    key=f"manual_acer_{current_edital['id']}_{wk['key']}_{widget_id}",
+                                )
+                            with mc3:
+                                st.number_input(
+                                    "Erros", min_value=0, value=max(int(m_resp) - int(m_acer), 0),
+                                    disabled=True,
+                                    key=f"manual_err_{current_edital['id']}_{wk['key']}_{widget_id}",
+                                )
+                            if st.button("Aplicar", key=f"apply_manual_{current_edital['id']}_{wk['key']}_{widget_id}"):
                                 wk_log = state["weeklyLog"].setdefault(wk["key"], {})
                                 ed_log = wk_log.setdefault(current_edital["id"], {})
-                                if offset == 0 and p_done > done:
+                                if offset == 0 and m_resp > done:
                                     today_str = date.today().isoformat()
-                                    state["dailyActivity"][today_str] = state["dailyActivity"].get(today_str, 0) + (p_done - done)
-                                ed_log[key] = {"done": p_done, "correct": min(p_correct, p_done)}
+                                    state["dailyActivity"][today_str] = state["dailyActivity"].get(today_str, 0) + (m_resp - done)
+                                ed_log[key] = {"done": int(m_resp), "correct": int(min(m_acer, m_resp))}
                                 if save_state(state):
                                     st.rerun()
 
@@ -1108,7 +1170,7 @@ if page == "Painel":
                 unsafe_allow_html=True,
             )
             if st.button("Ver dashboard completo →", width="stretch"):
-                st.session_state.page = "Dashboard"
+                _go_to_page("Dashboard")
                 st.rerun()
 
             with st.container(border=True):
