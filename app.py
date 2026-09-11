@@ -349,12 +349,11 @@ def _norm(s) -> str:
 
 
 def _go_to_page(page_name: str):
-    """Muda de página programaticamente (ex.: um botão que leva pro Dashboard).
-    É preciso setar tanto `page` quanto a chave do próprio widget de rádio da
-    barra lateral ("page_radio") — senão o rádio, que tem memória própria,
-    sobrescreve a mudança de volta pra página em que já estava."""
+    """Muda de página programaticamente (ex.: um botão que leva pro Painel).
+    Só mexe em `st.session_state.page` — o widget de navegação da barra
+    lateral usa uma chave dinâmica derivada desse valor, então nunca
+    precisamos (nem podemos, sem erro) escrever direto na chave do widget."""
     st.session_state.page = page_name
-    st.session_state["page_radio"] = page_name
 
 
 def format_minutes(total_minutes) -> str:
@@ -786,13 +785,16 @@ if "page" not in st.session_state:
 
 with st.sidebar:
     st.markdown("### 🎯 Coach de Estudos")
-    st.session_state.page = st.radio(
+    _page_widget_key = f"page_radio_{st.session_state.page}"
+    _chosen_page = st.radio(
         "Navegação",
         PAGES,
         index=PAGES.index(st.session_state.page),
         label_visibility="collapsed",
-        key="page_radio",
+        key=_page_widget_key,
     )
+    if _chosen_page != st.session_state.page:
+        st.session_state.page = _chosen_page
 
     st.divider()
     st.markdown("**📚 Editais**")
@@ -1244,9 +1246,6 @@ if page == "Painel":
                 </div>""",
                 unsafe_allow_html=True,
             )
-            if st.button("Ver dashboard completo →", width="stretch"):
-                _go_to_page("Dashboard")
-                st.rerun()
 
             with st.container(border=True):
                 st.markdown("**Aproveitamento por matéria**")
