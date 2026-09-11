@@ -357,6 +357,19 @@ def _go_to_page(page_name: str):
     st.session_state["page_radio"] = page_name
 
 
+def format_minutes(total_minutes) -> str:
+    """Formata minutos como '1h30min', '45min' etc."""
+    total_minutes = int(total_minutes or 0)
+    if not total_minutes:
+        return "0min"
+    h, m = divmod(total_minutes, 60)
+    if h and m:
+        return f"{h}h{m}min"
+    if h:
+        return f"{h}h"
+    return f"{m}min"
+
+
 def parse_tec_counter(text: str):
     """Extrai (respondidas, acertos, erros) de um texto colado do contador do
     TEC Concursos. Reconhece tanto o formato antigo, ex.: "1 de 964 (1 R, 1 A
@@ -957,8 +970,65 @@ if page == "Painel":
                         st.session_state[coach_idx_key] = (idx + 1) % len(candidates)
                         st.rerun()
 
+                st.markdown("###### 📥 Registrar essa sessão")
+                study_type = st.radio(
+                    "Como você estudou?", ["Questões", "Teoria/Leitura", "Vídeo-aula"],
+                    horizontal=True, key=f"coach_log_type_{current_edital['id']}",
+                )
+                qc1, qc2, qc3 = st.columns(3)
+                with qc1:
+                    if study_type == "Questões":
+                        log_done = st.number_input(
+                            "Questões respondidas", min_value=0, value=0, key=f"coach_log_done_{current_edital['id']}"
+                        )
+                    else:
+                        log_done = 0
+                        st.caption("Sem questões nessa sessão.")
+                with qc2:
+                    if study_type == "Questões":
+                        log_correct = st.number_input(
+                            "Acertos", min_value=0, max_value=max(int(log_done), 0), value=0,
+                            key=f"coach_log_correct_{current_edital['id']}",
+                        )
+                    else:
+                        log_correct = 0
+                with qc3:
+                    log_minutes = st.number_input(
+                        "Minutos gastos", min_value=0, value=0, key=f"coach_log_minutes_{current_edital['id']}"
+                    )
+
+                if st.button("✅ Registrar sessão", key=f"coach_log_apply_{current_edital['id']}"):
+                    if study_type == "Questões" and log_done == 0 and log_minutes == 0:
+                        st.warning("Preencha ao menos as questões respondidas ou o tempo gasto.")
+                    elif study_type != "Questões" and log_minutes == 0:
+                        st.warning("Informe quanto tempo você gastou nessa sessão.")
+                    else:
+                        log_key = subject_key(s["materia"], s.get("assunto", ""))
+                        wk_log = state["weeklyLog"].setdefault(wk["key"], {})
+                        ed_log = wk_log.setdefault(current_edital["id"], {})
+                        entry = ed_log.setdefault(log_key, {"done": 0, "correct": 0, "minutes": 0})
+                        entry["done"] = entry.get("done", 0) + int(log_done)
+                        entry["correct"] = entry.get("correct", 0) + int(min(log_correct, log_done))
+                        entry["minutes"] = entry.get("minutes", 0) + int(log_minutes)
+
+                        activity_delta = int(log_done) if study_type == "Questões" else (1 if log_minutes > 0 else 0)
+                        today_str = date.today().isoformat()
+                        state["dailyActivity"][today_str] = state["dailyActivity"].get(today_str, 0) + activity_delta
+
+                        for wk_key_reset in (
+                            f"coach_log_done_{current_edital['id']}",
+                            f"coach_log_correct_{current_edital['id']}",
+                            f"coach_log_minutes_{current_edital['id']}",
+                        ):
+                            st.session_state.pop(wk_key_reset, None)
+
+                        if save_state(state):
+                            st.toast("Sessão registrada!")
+                            st.rerun()
+
         total_done = sum(week_data.get(subject_key(s["materia"], s.get("assunto", "")), {}).get("done", 0) for s in subjects)
         total_correct = sum(week_data.get(subject_key(s["materia"], s.get("assunto", "")), {}).get("correct", 0) for s in subjects)
+        total_minutes = sum(week_data.get(subject_key(s["materia"], s.get("assunto", "")), {}).get("minutes", 0) for s in subjects)
         total_goal_sum = sum(weekly_goal_for(s, total_goal, sum_weights) for s in subjects)
         pct = round(100 * total_done / total_goal_sum) if total_goal_sum else 0
         accuracy_pct = round(100 * total_correct / total_done) if total_done else 0
@@ -1006,7 +1076,7 @@ if page == "Painel":
                 hist_df = pd.DataFrame(rows).set_index("Semana")
                 st.bar_chart(hist_df[["Feitas"]], color=ACCENT)
 
-            m1, m2, m3 = st.columns(3)
+            m1, m2, m3, m4 = st.columns(4)
             with m1:
                 with st.container(border=True):
                     st.markdown(f'<span class="metric-dot" style="background:{ACCENT}"></span>**Questões feitas**', unsafe_allow_html=True)
@@ -1022,6 +1092,11 @@ if page == "Painel":
                     st.markdown(f'<span class="metric-dot" style="background:{PURPLE}"></span>**Streak**', unsafe_allow_html=True)
                     st.markdown(f'<div class="hero-number" style="font-size:26px;">{streak} dias</div>', unsafe_allow_html=True)
                     st.progress(min(1.0, streak / 30))
+            with m4:
+                with st.container(border=True):
+                    st.markdown(f'<span class="metric-dot" style="background:{AMBER}"></span>**Tempo estudado**', unsafe_allow_html=True)
+                    st.markdown(f'<div class="hero-number" style="font-size:26px;">{format_minutes(total_minutes)}</div>', unsafe_allow_html=True)
+                    st.caption("nesta semana")
 
             st.markdown("#### Matérias")
             class_filter = st.radio(
@@ -1115,7 +1190,7 @@ if page == "Painel":
                                     if offset == 0 and p_done > done:
                                         today_str = date.today().isoformat()
                                         state["dailyActivity"][today_str] = state["dailyActivity"].get(today_str, 0) + (p_done - done)
-                                    ed_log[key] = {"done": p_done, "correct": min(p_correct, p_done)}
+                                    ed_log[key] = {**ed_log.get(key, {}), "done": p_done, "correct": min(p_correct, p_done)}
                                     if save_state(state):
                                         st.rerun()
 
@@ -1145,14 +1220,14 @@ if page == "Painel":
                                 if offset == 0 and m_resp > done:
                                     today_str = date.today().isoformat()
                                     state["dailyActivity"][today_str] = state["dailyActivity"].get(today_str, 0) + (m_resp - done)
-                                ed_log[key] = {"done": int(m_resp), "correct": int(min(m_acer, m_resp))}
+                                ed_log[key] = {**ed_log.get(key, {}), "done": int(m_resp), "correct": int(min(m_acer, m_resp))}
                                 if save_state(state):
                                     st.rerun()
 
                     if new_done != done or new_correct != correct:
                         wk_log = state["weeklyLog"].setdefault(wk["key"], {})
                         ed_log = wk_log.setdefault(current_edital["id"], {})
-                        ed_log[key] = {"done": int(new_done), "correct": int(min(new_correct, new_done))}
+                        ed_log[key] = {**ed_log.get(key, {}), "done": int(new_done), "correct": int(min(new_correct, new_done))}
                         if offset == 0 and new_done > done:
                             today_str = date.today().isoformat()
                             state["dailyActivity"][today_str] = state["dailyActivity"].get(today_str, 0) + (new_done - done)
@@ -1570,22 +1645,25 @@ elif page == "Importar planilha":
 elif page == "Dashboard":
     total_attempts = 0
     total_correct = 0
+    total_minutes_all_time = 0
     for wk_log in state["weeklyLog"].values():
         ed_log = wk_log.get(current_edital["id"], {})
         for v in ed_log.values():
             total_attempts += v.get("done", 0)
             total_correct += v.get("correct", 0)
+            total_minutes_all_time += v.get("minutes", 0)
 
     xp = total_attempts * 2 + total_correct * 3
     level, progress = level_from_xp(xp)
     streak = compute_streak(state["dailyActivity"])
     accuracy = total_correct / total_attempts if total_attempts else 0
 
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Nível", level)
     c2.metric("XP total", xp)
     c3.metric("Streak", f"{streak} dias")
     c4.metric("Aproveitamento geral", f"{round(accuracy*100)}%")
+    c5.metric("Tempo estudado (total)", format_minutes(total_minutes_all_time))
     st.progress(progress)
 
     badge_defs = [
@@ -1609,6 +1687,7 @@ elif page == "Dashboard":
         ed_log = state["weeklyLog"].get(wk_o["key"], {}).get(current_edital["id"], {})
         done = 0
         correct = 0
+        minutes = 0
         goal = 0
         for s in subjects:
             key = subject_key(s["materia"], s.get("assunto", ""))
@@ -1616,16 +1695,21 @@ elif page == "Dashboard":
             v = ed_log.get(key, {})
             done += v.get("done", 0)
             correct += v.get("correct", 0)
+            minutes += v.get("minutes", 0)
         rows.append(
             {
                 "Semana": wk_o["monday"].strftime("%d/%m"),
                 "Meta": goal,
                 "Feitas": done,
                 "Acerto %": round(100 * correct / done) if done else 0,
+                "Minutos": minutes,
             }
         )
     hist_df = pd.DataFrame(rows).set_index("Semana")
-    st.line_chart(hist_df)
+    st.line_chart(hist_df[["Meta", "Feitas", "Acerto %"]])
+
+    st.markdown("### Tempo estudado por semana")
+    st.bar_chart(hist_df[["Minutos"]], color=AMBER)
 
     st.markdown("### Desempenho por matéria (semana atual)")
     week_now = state["weeklyLog"].get(week_info(0)["key"], {}).get(current_edital["id"], {})
@@ -1635,12 +1719,14 @@ elif page == "Dashboard":
         v = week_now.get(key, {})
         d = v.get("done", 0)
         c_ = v.get("correct", 0)
+        min_ = v.get("minutes", 0)
         perf_rows.append(
             {
                 "Matéria": s["materia"],
                 "Peso": s["peso"],
                 "Feitas/Meta": f"{d}/{weekly_goal_for(s, total_goal, sum_weights)}",
                 "Acerto": f"{round(100*c_/d)}%" if d else "—",
+                "Tempo": format_minutes(min_) if min_ else "—",
             }
         )
     st.dataframe(pd.DataFrame(perf_rows), width="stretch", hide_index=True)
