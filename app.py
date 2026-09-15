@@ -987,26 +987,33 @@ if page == "Painel":
                 other_editais = find_matching_editais(
                     s["materia"], s.get("assunto", ""), current_edital["id"], state["editais"]
                 )
-                tags_html = ""
-                for oed in other_editais:
-                    o_remaining = days_until(oed.get("provaDate"))
-                    tag_css = "cross-tag-red" if (o_remaining is not None and o_remaining < 0) else "cross-tag-green"
-                    tags_html += f'<span class="cross-tag {tag_css}">{oed["name"]}</span>'
 
-                st.markdown(
-                    f"""<div class="coach-card" style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px;">
-                        <div style="flex:1; min-width:0;">
+                coach_l, coach_r = st.columns([3, 1])
+                with coach_l:
+                    st.markdown(
+                        f"""<div class="coach-card">
                             <div class="coach-eyebrow">🎯 ESTUDE AGORA</div>
                             <div class="coach-subject">{s['materia']}</div>
                             <div class="coach-topic">{s.get('assunto','')}</div>
                             <span class="coach-reason">{best['reason']}</span>
-                        </div>
-                        <div style="display:flex; flex-direction:column; gap:6px; align-items:flex-end;">
-                            {tags_html}
-                        </div>
-                    </div>""",
-                    unsafe_allow_html=True,
-                )
+                        </div>""",
+                        unsafe_allow_html=True,
+                    )
+                with coach_r:
+                    if other_editais:
+                        st.markdown(
+                            '<div style="padding-top:8px;">Também cai em:</div>',
+                            unsafe_allow_html=True,
+                        )
+                        for oed in other_editais:
+                            o_remaining = days_until(oed.get("provaDate"))
+                            tag_css = "cross-tag-red" if (o_remaining is not None and o_remaining < 0) else "cross-tag-green"
+                            st.markdown(
+                                f'<div style="text-align:right; margin-bottom:4px;">'
+                                f'<span class="cross-tag {tag_css}">{oed["name"]}</span></div>',
+                                unsafe_allow_html=True,
+                            )
+
                 bcol1, bcol2 = st.columns([2, 1])
                 with bcol1:
                     if s.get("link"):
