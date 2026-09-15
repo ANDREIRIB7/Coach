@@ -1005,7 +1005,11 @@ if page == "Painel":
                     s["materia"], s.get("assunto", ""), current_edital["id"], state["editais"]
                 )
 
-                coach_l, coach_r = st.columns([3, 1])
+                if other_editais:
+                    coach_l, coach_r = st.columns([3, 1])
+                else:
+                    coach_l, coach_r = st.container(), None
+
                 with coach_l:
                     st.markdown(
                         f"""<div class="coach-card">
@@ -1016,8 +1020,8 @@ if page == "Painel":
                         </div>""",
                         unsafe_allow_html=True,
                     )
-                with coach_r:
-                    if other_editais:
+                if coach_r is not None:
+                    with coach_r:
                         st.markdown(
                             '<div style="padding-top:8px;">Também cai em:</div>',
                             unsafe_allow_html=True,
