@@ -196,6 +196,23 @@ def find_matching_editais(materia: str, assunto: str, exclude_edital_id: str, al
     return matches
 
 
+def _next_candidate_index(candidates: list, start_idx: int, same_materia: bool, materia_norm: str) -> int:
+    """Anda pela lista de candidatos (já ordenada por prioridade), a partir de
+    start_idx, e acha o próximo cujo matéria seja igual (same_materia=True,
+    pra 'Trocar Assunto') ou diferente (same_materia=False, pra 'Trocar
+    Matéria') da matéria atual. Se não achar nenhum, devolve o próprio
+    start_idx (sinaliza 'não tem outra opção')."""
+    n = len(candidates)
+    for step in range(1, n + 1):
+        i = (start_idx + step) % n
+        cand_materia_norm = _norm(candidates[i]["subject"]["materia"])
+        if same_materia and cand_materia_norm == materia_norm:
+            return i
+        if not same_materia and cand_materia_norm != materia_norm:
+            return i
+    return start_idx
+
+
 # ----------------------------------------------------------------------------
 # Funções utilitárias
 # ----------------------------------------------------------------------------
@@ -1014,14 +1031,26 @@ if page == "Painel":
                                 unsafe_allow_html=True,
                             )
 
-                bcol1, bcol2 = st.columns([2, 1])
+                bcol1, bcol2, bcol3 = st.columns([2, 1, 1])
                 with bcol1:
                     if s.get("link"):
                         st.link_button("Abrir no TEC ↗", s["link"])
                 with bcol2:
-                    if len(candidates) > 1 and st.button("🔄 Sugerir outra matéria", key=f"coach_next_{current_edital['id']}"):
-                        st.session_state[coach_idx_key] = (idx + 1) % len(candidates)
-                        st.rerun()
+                    if st.button("📖 Trocar assunto", key=f"coach_swap_topic_{current_edital['id']}", width="stretch"):
+                        new_idx = _next_candidate_index(candidates, idx, same_materia=True, materia_norm=_norm(s["materia"]))
+                        if new_idx == idx:
+                            st.toast("Só há esse assunto dessa matéria no momento.")
+                        else:
+                            st.session_state[coach_idx_key] = new_idx
+                            st.rerun()
+                with bcol3:
+                    if st.button("🔀 Trocar matéria", key=f"coach_swap_subject_{current_edital['id']}", width="stretch"):
+                        new_idx = _next_candidate_index(candidates, idx, same_materia=False, materia_norm=_norm(s["materia"]))
+                        if new_idx == idx:
+                            st.toast("Só há essa matéria disponível no momento.")
+                        else:
+                            st.session_state[coach_idx_key] = new_idx
+                            st.rerun()
 
                 st.markdown("###### 📥 Registrar essa sessão")
                 study_type = st.radio(
