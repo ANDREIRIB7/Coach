@@ -157,6 +157,13 @@ div[data-testid="stRadio"] label > div:first-child {{ display: none; }}
 .class-geral {{ background: {ACCENT_SOFT}; color: {ACCENT}; }}
 .class-especifico {{ background: #FCE9FF; color: {PURPLE}; }}
 .class-neutral {{ background: #F1F3F9; color: {MUTED}; }}
+.cross-tag {{
+    display: inline-block; font-size: 11.5px; font-weight: 700;
+    padding: 4px 11px; border-radius: 10px; white-space: nowrap;
+    border: 1px solid transparent;
+}}
+.cross-tag-green {{ background: #DCFCE7; color: #15803D; border-color: #86EFAC; }}
+.cross-tag-red {{ background: #FEE2E2; color: #B91C1C; border-color: #FCA5A5; }}
 </style>
 """
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
@@ -164,6 +171,29 @@ st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 
 def subject_color(name: str) -> str:
     return PALETTE[hash(name or "") % len(PALETTE)]
+
+
+def find_matching_editais(materia: str, assunto: str, exclude_edital_id: str, all_editais: list):
+    """Retorna a lista de OUTROS editais (não o exclude_edital_id) que também
+    têm essa matéria — e, se houver assunto, o mesmo assunto também. Usado
+    pra avisar quando um tópico cai em mais de uma prova."""
+    target_materia = _norm(materia)
+    target_assunto = _norm(assunto)
+    matches = []
+    for ed in all_editais:
+        if ed["id"] == exclude_edital_id:
+            continue
+        for s in ed.get("subjects", []):
+            if _norm(s.get("materia", "")) != target_materia:
+                continue
+            if target_assunto:
+                if _norm(s.get("assunto", "")) == target_assunto:
+                    matches.append(ed)
+                    break
+            else:
+                matches.append(ed)
+                break
+    return matches
 
 
 # ----------------------------------------------------------------------------
@@ -954,12 +984,26 @@ if page == "Painel":
                 idx = st.session_state[coach_idx_key] % len(candidates)
                 best = candidates[idx]
                 s = best["subject"]
+                other_editais = find_matching_editais(
+                    s["materia"], s.get("assunto", ""), current_edital["id"], state["editais"]
+                )
+                tags_html = ""
+                for oed in other_editais:
+                    o_remaining = days_until(oed.get("provaDate"))
+                    tag_css = "cross-tag-red" if (o_remaining is not None and o_remaining < 0) else "cross-tag-green"
+                    tags_html += f'<span class="cross-tag {tag_css}">{oed["name"]}</span>'
+
                 st.markdown(
-                    f"""<div class="coach-card">
-                        <div class="coach-eyebrow">🎯 ESTUDE AGORA</div>
-                        <div class="coach-subject">{s['materia']}</div>
-                        <div class="coach-topic">{s.get('assunto','')}</div>
-                        <span class="coach-reason">{best['reason']}</span>
+                    f"""<div class="coach-card" style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px;">
+                        <div style="flex:1; min-width:0;">
+                            <div class="coach-eyebrow">🎯 ESTUDE AGORA</div>
+                            <div class="coach-subject">{s['materia']}</div>
+                            <div class="coach-topic">{s.get('assunto','')}</div>
+                            <span class="coach-reason">{best['reason']}</span>
+                        </div>
+                        <div style="display:flex; flex-direction:column; gap:6px; align-items:flex-end;">
+                            {tags_html}
+                        </div>
                     </div>""",
                     unsafe_allow_html=True,
                 )
@@ -1101,14 +1145,26 @@ if page == "Painel":
                     st.caption("nesta semana")
 
             st.markdown("#### Matérias")
-            class_filter = st.radio(
-                "Filtrar", ["Todas", "Geral", "Específico"], horizontal=True,
-                label_visibility="collapsed", key="class_filter",
-            )
+            filt_col, cross_col = st.columns([3, 2])
+            with filt_col:
+                class_filter = st.radio(
+                    "Filtrar", ["Todas", "Geral", "Específico"], horizontal=True,
+                    label_visibility="collapsed", key="class_filter",
+                )
+            with cross_col:
+                only_cross = st.checkbox(
+                    "🔗 Só matérias em mais de um edital", key="only_cross_edital",
+                    help="Mostra apenas matérias/assuntos que também aparecem em outros editais que você cadastrou.",
+                )
             if class_filter != "Todas":
                 visible_subjects_shown = [s for s in visible_subjects if s.get("classificacao", "Geral") == class_filter]
             else:
                 visible_subjects_shown = visible_subjects
+            if only_cross:
+                visible_subjects_shown = [
+                    s for s in visible_subjects_shown
+                    if find_matching_editais(s["materia"], s.get("assunto", ""), current_edital["id"], state["editais"])
+                ]
             if not visible_subjects_shown:
                 st.caption("Nenhuma matéria encontrada para esse filtro.")
 
